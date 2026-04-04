@@ -1,8 +1,10 @@
-import gi
-gi.require_version("Gtk", "4.0")
-try:
-    gi.require_version("Gtk4LayerShell", "1.0")
-    from gi.repository import Gtk4LayerShell
-    print("Layer Shell OK")
-except Exception as e:
-    print("Layer Shell Bad", e)
+import evdev
+for p in evdev.list_devices():
+    d = evdev.InputDevice(p)
+    if 'Legion' in d.name and d.info.vendor == 0x17EF:
+        print(f'{d.name} ({p})')
+        caps = d.capabilities()
+        if evdev.ecodes.EV_ABS in caps:
+            for code, ainfo in caps[evdev.ecodes.EV_ABS]:
+                if code in [evdev.ecodes.ABS_Z, evdev.ecodes.ABS_RZ, evdev.ecodes.ABS_BRAKE, evdev.ecodes.ABS_GAS]:
+                    print(f'  Trigger code={code}, max={ainfo.max}, min={ainfo.min}')

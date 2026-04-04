@@ -107,13 +107,32 @@ class InputMapper:
             # 2. Setup Virtual UInput sink if we don't have one
             if not self.uinput:
                 try:
+                    # Dynamically determine capabilities boundaries to prevent axis wrap-around!
+                    dynamic_caps = {evdev.ecodes.EV_KEY: self.capabilities[evdev.ecodes.EV_KEY]}
+                    abs_caps = {}
+                    
+                    # Store defaults in a mapping dictionary
+                    defaults = {code: info for code, info in self.capabilities[evdev.ecodes.EV_ABS]}
+                    
+                    # Scan grabbed dev for their real limits and override our defaults!
+                    for dev in self.grabbed_devs:
+                        if evdev.ecodes.EV_ABS in dev.capabilities():
+                            for code, info in dev.capabilities()[evdev.ecodes.EV_ABS]:
+                                target_code = self.axis_remap.get(code, code)
+                                if target_code in defaults:
+                                    defaults[target_code] = info
+                                    print(f"[InputMapper] Mapped physical bound for {target_code}: min={info.min}, max={info.max}")
+                    
+                    dynamic_caps[evdev.ecodes.EV_ABS] = list(defaults.items())
+                    
                     self.uinput = evdev.UInput(
-                        events=self.capabilities,
+                        events=dynamic_caps,
                         name="Virtual Xbox 360 Controller",
                         vendor=0x045E,
                         product=0x028E,
                         version=0x0110
                     )
+
                     print("[InputMapper] Created Virtual Xbox 360 UInput Device.")
                 except Exception as e:
                     print(f"[InputMapper] Failed to create virtual device: {e}")
@@ -152,3 +171,6 @@ class InputMapper:
             supported_axes = [item[0] for item in self.capabilities[evdev.ecodes.EV_ABS]]
             if mapped_axis in supported_axes:
                 self.uinput.write(evdev.ecodes.EV_ABS, mapped_axis, event.value)
+                if event.code in [evdev.ecodes.ABS_BRAKE, evdev.ecodes.ABS_GAS, evdev.ecodes.ABS_Z, evdev.ecodes.ABS_RZ]:
+                    print(f"[InputMapper] Trigger {event.code} raw value: {event.value}")
+

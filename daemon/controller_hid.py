@@ -126,6 +126,7 @@ def send_commands(commands):
         try:
             with Device(path=path) as device:
                 for cmd in commands:
+                    print(cmd)
                     device.write(pad_command(cmd))
                 success = True
         except Exception as e:
@@ -178,68 +179,38 @@ def apply_hardware_remapping(mappings):
         "device": 0x01,     # 0x01: controller, 0x02: kbd, 0x03: mouse
         "keys": [0x16, 0, 0, 0, 0] # up to 5 keys/buttons
     }
-    
-    HID Packet format (based on Wireshark capture, USB overhead stripped):
-    [0x05] [0x12] [0x0a] [0x03] [0x01] [XX] [count] [row0] [row1] ...
-    where row = [btn_code, device_code, key0, key1, key2, key3, key4]  (7 bytes)
-    
-    Known XX values from capture:
-      1 row  -> 0x11 (17)
-      7 rows -> 0x22 (34)
-      8 rows -> 0x21 (33)
-    Pattern: XX = 8 + count * 7 - (count - 1)? Actually simpler: count*7 + 6 doesn't match...
-    8 rows: 8*7=56, XX=0x21=33. 7 rows: 7*7=49, XX=0x22=34. 1 row: 1*7=7, XX=0x11=17.
-    Differences: 33+56=89, 34+49=83... no pattern on sum.
-    Diff between XX and count: 33-8=25, 34-7=27, 17-1=16... no clear pattern.
-    Best approach: just compute XX = 8 + (count - 1) * 7 + count (still wrong).
-    For now: map known values, and for unknown counts try: XX = 17 + (count - 1) * 7
-    1 -> 17+0=17=0x11 ✓, 7->17+42=59... nope.
-    Try XX = 0x0a + count * (0x0a? 0x05?). 0x0a + 1*7=17 ✓! 0x0a + 7*7=59 ✗.
-    Simpler: XX = (payload_length - 1) where payload_length = 5 + count * 7?
-    5 + 1*7 = 12 -> 11=0x0b ✗.
-    Let's just hard-compute from data: XX = count_byte_high_nibble_weirdness.
-    SIMPLEST FIX: use the known map and for others, use 0x10 + count as best guess.
     """
-    count = len(mappings)
-    if count == 0:
+    if not mappings:
         return
 
-    # Known XX values from Wireshark captures
-    # Pattern analysis: XX for 1=0x11, 7=0x22, 8=0x21
-    # It looks like XX = total_data_bytes_after_count / something
-    # 1 row: 0x11=17. Remaining data after XX+count = 1*7=7. 17-7=10=0x0a
-    # 7 rows: 0x22=34. Remaining = 7*7=49. 34-49 = -15 (no)
-    # Let's try: XX is just part of the command opcode sub-sequence and not dependent on count.
-    # Actually, maybe XX and count are swapped: 0x21 0x08 -> XX=0x21, count=8
-    # but for 7 rows: 0x22 0x07 and 1 row: 0x11 0x01.
-    # For 1 row: 0x11 appears before 0x01. So XX > count by: 0x11-0x01=16, 0x22-0x07=27, 0x21-0x08=25
-    # No clear linear pattern either. But 0x11=17=0x10+0x01, 0x22=34=0x10+0x07+...
-    # Best guess: just always send 0x21 (8 row value) as a max placeholder for now,
-    # or try: XX = total_padded_rows_len where each row is ≥ 7 bytes.
-    # For safety: use lookup and fall back gracefully.
-    xx_map = {1: 0x11, 7: 0x22, 8: 0x21}
-    # Interpolate for missing counts
-    xx = xx_map.get(count, 0x10 + count)
+    # Max 8 rows per 64-byte packet
+    chunks = [mappings[i:i + 8] for i in range(0, len(mappings), 8)]
+    total_chunks = len(chunks)
 
-    # Build the base payload WITHOUT the Report ID yet
-    # Format according to Legion Space: [0x00, 0x12, 0x0a, ControllerID, 0x01, XX, count, ...rows...]
+    # Base payload structure
     base_data = [0x00, 0x12, 0x0a]
-    
-    # We must send this configuration to BOTH the Left (0x03) and Right (0x04) logical 
-    # devices on the Legion Go, otherwise some buttons (like M3) won't save.
+
+    # We send configuration to BOTH Left (0x03) and Right (0x04) logical devices
     for ctrl_id in [0x04]:
-        data = [0x05] + base_data + [ctrl_id, 0x01, xx, count]
-        for m in mappings:
-            # Each row: [btn_code, device, key0, key1, key2, key3, key4] = 7 bytes
-            row = [m["btn"], m["device"]] + (list(m["keys"]) + [0]*5)[:5]
-            data.extend(row)
+        for chunk_idx, chunk in enumerate(chunks):
+            current_chunk = chunk_idx + 1
+            count = len(chunk)
             
-        padded = pad_command(data)
-        
-        # Hex dump exactly what goes to hidapi
-        print(f"[HID-REMAP] Sending to Controller {ctrl_id:02x} (XX=0x{xx:02x}):")
-        for i in range(0, 64, 16):
-            hex_part = " ".join(f"{b:02x}" for b in padded[i:i+16])
-            print(f"  {i:04x}  {hex_part}")
-            
-        send_command(padded)
+            # The mystery XX byte is (total_chunks << 4) | current_chunk !
+            # e.g., 1 of 1 -> 0x11, 1 of 2 -> 0x21, 2 of 2 -> 0x22
+            xx = (total_chunks << 4) | current_chunk
+
+            data = [0x05] + base_data + [ctrl_id, 0x01, xx, count]
+            for m in chunk:
+                # Each row: [btn_code, device, key0, key1, key2, key3, key4] = 7 bytes
+                row = [m["btn"], m["device"]] + (list(m["keys"]) + [0]*5)[:5]
+                data.extend(row)
+
+            padded = pad_command(data)
+
+            print(f"[HID-REMAP] Sending to Controller {ctrl_id:02x} (Chunk {current_chunk}/{total_chunks}, XX=0x{xx:02x}):")
+            for i in range(0, 64, 16):
+                hex_part = " ".join(f"{b:02x}" for b in padded[i:i+16])
+                print(f"  {i:04x}  {hex_part}")
+
+            send_command(padded)
