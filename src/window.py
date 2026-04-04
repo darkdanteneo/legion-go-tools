@@ -2,6 +2,10 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gdk
+import json
+import time
+import os
+import subprocess
 
 try:
     gi.require_version("Gtk4LayerShell", "1.0")
@@ -201,6 +205,373 @@ class FanCurveWidget(Gtk.DrawingArea):
             if self.hover_callback:
                 self.hover_callback(None, None)
 
+class ControllerPanel(Gtk.Box):
+    def __init__(self, **kwargs):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15, margin_top=10, margin_start=12, margin_end=12, **kwargs)
+        
+        # --- 1. Input Profile ---
+        prof_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        prof_lbl = Gtk.Label(label="Input Profile", halign=Gtk.Align.START)
+        prof_lbl.add_css_class("heading")
+        prof_box.append(prof_lbl)
+
+        grid = Gtk.Grid(row_spacing=5, column_spacing=5, halign=Gtk.Align.CENTER)
+        self.prof_btns = []
+        for i in range(1, 5):
+            btn = Gtk.Button(label=f"Profile {i}")
+            btn.connect("clicked", self.on_profile_clicked, i)
+            self.prof_btns.append(btn)
+            grid.attach(btn, (i-1)%2, (i-1)//2, 1, 1)
+        prof_box.append(grid)
+        self.append(prof_box)
+
+        # --- 2. Controller LED ---
+        led_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        led_lbl = Gtk.Label(label="Controller LED", halign=Gtk.Align.START)
+        led_lbl.add_css_class("heading")
+        led_box.append(led_lbl)
+
+        # Mode
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mode_box.append(Gtk.Label(label="Mode", halign=Gtk.Align.START))
+        self.led_mode = Gtk.DropDown.new_from_strings(["Solid", "Pulse", "Dynamic", "Spiral"])
+        self.led_mode.set_selected(0)
+        self.led_mode.connect("notify::selected", self.on_led_changed)
+        mode_box.append(self.led_mode)
+        
+        self.led_off_btn = Gtk.Button(label="Turn OFF LEDs")
+        self.led_off_btn.connect("clicked", self.on_led_off)
+        mode_box.append(self.led_off_btn)
+        led_box.append(mode_box)
+
+        # RGB Sliders
+        color_grid = Gtk.Grid(row_spacing=2, column_spacing=10)
+        self.sl_r = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+        self.sl_g = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+        self.sl_b = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+        
+        # Set values before connecting to avoid early signals
+        self.sl_r.set_value(255) # default red
+        
+        for s in [self.sl_r, self.sl_g, self.sl_b]:
+            s.set_draw_value(False)
+            s.set_hexpand(True)
+            s.connect("value-changed", self.on_led_changed)
+        
+        lbl_r = Gtk.Label(label="R")
+        lbl_r.add_css_class("caption")
+        color_grid.attach(lbl_r, 0, 0, 1, 1)
+        color_grid.attach(self.sl_r, 1, 0, 1, 1)
+        
+        lbl_g = Gtk.Label(label="G")
+        lbl_g.add_css_class("caption")
+        color_grid.attach(lbl_g, 0, 1, 1, 1)
+        color_grid.attach(self.sl_g, 1, 1, 1, 1)
+        
+        lbl_b = Gtk.Label(label="B")
+        lbl_b.add_css_class("caption")
+        color_grid.attach(lbl_b, 0, 2, 1, 1)
+        color_grid.attach(self.sl_b, 1, 2, 1, 1)
+        led_box.append(color_grid)
+
+        # Brightness & Speed
+        bs_grid = Gtk.Grid(row_spacing=2, column_spacing=10)
+        self.sl_br = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.sl_sp = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        
+        for s in [self.sl_br, self.sl_sp]:
+            s.set_draw_value(False)
+            s.set_value(100)
+            s.set_hexpand(True)
+            s.connect("value-changed", self.on_led_changed)
+
+        lbl_br = Gtk.Label(label="Brightness")
+        lbl_br.add_css_class("caption")
+        bs_grid.attach(lbl_br, 0, 0, 1, 1)
+        bs_grid.attach(self.sl_br, 1, 0, 1, 1)
+        
+        lbl_sp = Gtk.Label(label="Speed")
+        lbl_sp.add_css_class("caption")
+        bs_grid.attach(lbl_sp, 0, 1, 1, 1)
+        bs_grid.attach(self.sl_sp, 1, 1, 1, 1)
+        led_box.append(bs_grid)
+
+        self.append(led_box)
+
+        # --- 3. Button Remap ---
+        remap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        remap_lbl = Gtk.Label(label="Button Remap (Current Profile)", halign=Gtk.Align.START)
+        remap_lbl.add_css_class("heading")
+        remap_box.append(remap_lbl)
+
+        actions = [
+            "DISABLED", "L_STICK_CLICK", "R_STICK_CLICK",
+            "D_PAD_UP", "D_PAD_DOWN", "D_PAD_LEFT", "D_PAD_RIGHT",
+            "BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y",
+            "L_BUMPER", "L_TRIGGER", "R_BUMPER", "R_TRIGGER",
+            "VIEW", "MENU"
+        ]
+        self.remap_drops = {}
+        self.active_profile = 1
+
+        rg = Gtk.Grid(row_spacing=5, column_spacing=10)
+        for i, btn in enumerate(["Y1", "Y2", "Y3", "M2", "M3"]):
+            rg.attach(Gtk.Label(label=btn), 0, i, 1, 1)
+            drop = Gtk.DropDown.new_from_strings(actions)
+            drop.connect("notify::selected", self.on_remap_changed, btn, actions)
+            self.remap_drops[btn] = drop
+            rg.attach(drop, 1, i, 1, 1)
+        remap_box.append(rg)
+        
+        self.append(remap_box)
+
+    def on_profile_clicked(self, btn, prof_num):
+        self.active_profile = prof_num
+        send_command(f"SET_CTRL_PROFILE {prof_num}")
+        # Color the active button
+        for b in self.prof_btns:
+            b.remove_css_class("suggested-action")
+        btn.add_css_class("suggested-action")
+
+    def on_led_changed(self, *args):
+        if not hasattr(self, 'sl_br'): return
+        modes = ["SOLID", "PULSE", "DYNAMIC", "SPIRAL"]
+        mode = modes[self.led_mode.get_selected()]
+        r, g, b = int(self.sl_r.get_value()), int(self.sl_g.get_value()), int(self.sl_b.get_value())
+        br, sp = int(self.sl_br.get_value()), int(self.sl_sp.get_value())
+        send_command(f"SET_CTRL_RGB {r} {g} {b} {mode} {br} {sp} BOTH")
+
+    def on_led_off(self, btn):
+        send_command("SET_CTRL_RGB_OFF BOTH")
+
+    def on_remap_changed(self, dropdown, pspec, btn_name, actions):
+        act = actions[dropdown.get_selected()]
+        send_command(f"REMAP_BTN {self.active_profile} {btn_name} {act}")
+
+class RemappingPanel(Gtk.Box):
+    def __init__(self, **kwargs):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=10, margin_start=12, margin_end=12, **kwargs)
+        
+        # Hardware key database from user
+        self.HW_BUTTONS = {
+            "L-Stick Click": 0x03, "L-Stick Up": 0x04, "L-Stick Down": 0x05, "L-Stick Left": 0x06, "L-Stick Right": 0x07,
+            "R-Stick Click": 0x08, "R-Stick Up": 0x09, "R-Stick Down": 0x0a, "R-Stick Left": 0x0b, "R-Stick Right": 0x0c,
+            "D-Pad Up": 0x0d, "D-Pad Down": 0x0e, "D-Pad Left": 0x0f, "D-Pad Right": 0x10,
+            "A": 0x12, "B": 0x13, "X": 0x14, "Y": 0x15,
+            "LB": 0x16, "LT": 0x17, "RB": 0x18, "RT": 0x19,
+            "Y1": 0x1c, "Y2": 0x1d, "Y3": 0x1e, "M2": 0x21, "M3": 0x22,
+            "View": 0x23, "Menu": 0x24
+        }
+        
+        self.KEYBOARD_KEYS = {
+            "None": 0x00, "Enter": 0x28, "Esc": 0x29, "Backspace": 0x2a, "Tab": 0x2b, "Space": 0x2c,
+            "A": 0x04, "B": 0x05, "C": 0x06, "D": 0x07, "E": 0x08, "F": 0x09, "G": 0x0a, "H": 0x0b,
+            "I": 0x0c, "J": 0x0d, "K": 0x0e, "L": 0x0f, "M": 0x10, "N": 0x11, "O": 0x12, "P": 0x13,
+            "Q": 0x14, "R": 0x15, "S": 0x16, "T": 0x17, "U": 0x18, "V": 0x19, "W": 0x1a, "X": 0x1b,
+            "Y": 0x1c, "Z": 0x1d, "1": 0x1e, "2": 0x1f, "3": 0x20, "4": 0x21, "5": 0x22, "6": 0x23,
+            "7": 0x24, "8": 0x25, "9": 0x26, "0": 0x27,
+            "L-Ctrl": 0xe0, "L-Shift": 0xe1, "L-Alt": 0xe2, "Win": 0xe3,
+            "R-Ctrl": 0xe4, "R-Shift": 0xe5, "R-Alt": 0xe6
+        }
+        
+        self.MOUSE_BTNS = {
+            "L-Click": 0x01, "R-Click": 0x02, "Mid-Click": 0x03, "Scroll-Up": 0x04, "Scroll-Dn": 0x05,
+            "Btn 4": 0x06, "Btn 5": 0x07
+        }
+        
+        self.staged_mappings = []
+        
+        lbl = Gtk.Label(label="Hardware Remapping", halign=Gtk.Align.START)
+        lbl.add_css_class("heading")
+        self.append(lbl)
+        
+        # --- Selector UI ---
+        entry_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        
+        # Source Button
+        src_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        src_box.append(Gtk.Label(label="Physical Button", hexpand=True, halign=Gtk.Align.START))
+        self.src_drop = Gtk.DropDown.new_from_strings(sorted(list(self.HW_BUTTONS.keys())))
+        src_box.append(self.src_drop)
+        entry_box.append(src_box)
+        
+        # Target Mode
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mode_box.append(Gtk.Label(label="Map To", hexpand=True, halign=Gtk.Align.START))
+        self.mode_drop = Gtk.DropDown.new_from_strings(["Controller", "Keyboard", "Mouse"])
+        self.mode_drop.connect("notify::selected", self.on_mode_changed)
+        mode_box.append(self.mode_drop)
+        entry_box.append(mode_box)
+        
+        # Target Key (Dynamic)
+        self.target_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.target_lbl = Gtk.Label(label="Value", hexpand=True, halign=Gtk.Align.START)
+        self.target_box.append(self.target_lbl)
+        self.target_drop = Gtk.DropDown.new_from_strings(sorted(list(self.HW_BUTTONS.keys())))
+        self.target_box.append(self.target_drop)
+        entry_box.append(self.target_box)
+        
+        # Multi-key for keyboard
+        self.keys_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        self.selected_keys = []
+        self.keys_lbl = Gtk.Label(label="Keys: None", halign=Gtk.Align.START)
+        self.keys_lbl.add_css_class("caption")
+        self.keys_box.append(self.keys_lbl)
+        
+        kb_ctrls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.add_key_btn = Gtk.Button(label="Add Key")
+        self.add_key_btn.connect("clicked", self.on_add_key_to_list)
+        kb_ctrls.append(self.add_key_btn)
+        
+        self.clear_keys_btn = Gtk.Button(label="Clear Keys")
+        self.clear_keys_btn.connect("clicked", self.on_clear_keys_list)
+        kb_ctrls.append(self.clear_keys_btn)
+        self.keys_box.append(kb_ctrls)
+        
+        entry_box.append(self.keys_box)
+        
+        add_btn = Gtk.Button(label="Add Mapping", halign=Gtk.Align.END)
+        add_btn.add_css_class("suggested-action")
+        add_btn.connect("clicked", self.on_add_mapping)
+        entry_box.append(add_btn)
+        
+        self.append(entry_box)
+        
+        # --- List View ---
+        self.list_lbl = Gtk.Label(label="Current Staged Mappings", halign=Gtk.Align.START, margin_top=10)
+        self.list_lbl.add_css_class("caption")
+        self.append(self.list_lbl)
+        
+        self.list_box = Gtk.ListBox()
+        self.list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.list_box.add_css_class("boxed-list")
+        
+        scroll = Gtk.ScrolledWindow(min_content_height=150, vexpand=True)
+        scroll.set_child(self.list_box)
+        self.append(scroll)
+        
+        # Apply/Clear
+        bb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        clear_btn = Gtk.Button(label="Clear All", hexpand=True)
+        clear_btn.connect("clicked", self.on_clear_all)
+        bb.append(clear_btn)
+        
+        apply_btn = Gtk.Button(label="Apply to Hardware", hexpand=True)
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.connect("clicked", self.on_apply)
+        bb.append(apply_btn)
+        self.append(bb)
+        
+        # Initial fix
+        self.on_mode_changed(None, None)
+
+    def on_mode_changed(self, dropdown, pspec):
+        mode = self.mode_drop.get_selected()
+        if mode == 0: # Controller
+            items = sorted(list(self.HW_BUTTONS.keys()))
+            self.keys_box.set_visible(False)
+        elif mode == 1: # Keyboard
+            items = sorted(list(self.KEYBOARD_KEYS.keys()))
+            self.keys_box.set_visible(True)
+        else: # Mouse
+            items = sorted(list(self.MOUSE_BTNS.keys()))
+            self.keys_box.set_visible(False)
+            
+        # Replace dropdown content
+        old = self.target_drop
+        self.target_box.remove(old)
+        self.target_drop = Gtk.DropDown.new_from_strings(items)
+        self.target_box.append(self.target_drop)
+        self.on_clear_keys_list(None)
+
+    def on_add_key_to_list(self, btn):
+        items = sorted(list(self.KEYBOARD_KEYS.keys()))
+        name = items[self.target_drop.get_selected()]
+        code = self.KEYBOARD_KEYS[name]
+        if len(self.selected_keys) < 5:
+            self.selected_keys.append({"name": name, "code": code})
+            self.update_keys_label()
+
+    def on_clear_keys_list(self, btn):
+        self.selected_keys = []
+        self.update_keys_label()
+
+    def update_keys_label(self):
+        if not self.selected_keys:
+            self.keys_lbl.set_label("Keys: None")
+        else:
+            names = [k["name"] for k in self.selected_keys]
+            self.keys_lbl.set_label("Keys: " + " + ".join(names))
+
+    def on_add_mapping(self, btn):
+        src_name = sorted(list(self.HW_BUTTONS.keys()))[self.src_drop.get_selected()]
+        src_code = self.HW_BUTTONS[src_name]
+        
+        mode = self.mode_drop.get_selected()
+        if mode == 0:
+            target_list = sorted(list(self.HW_BUTTONS.keys()))
+            target_name = target_list[self.target_drop.get_selected()]
+            target_code = self.HW_BUTTONS[target_name]
+            device = 1
+            keys = [target_code, 0, 0, 0, 0]
+            display = f"{src_name} → {target_name}"
+        elif mode == 1:
+            if not self.selected_keys: return
+            device = 2
+            codes = [k["code"] for k in self.selected_keys]
+            keys = (codes + [0]*5)[:5]
+            display = f"{src_name} → " + " + ".join([k["name"] for k in self.selected_keys])
+        else:
+            target_list = sorted(list(self.MOUSE_BTNS.keys()))
+            target_name = target_list[self.target_drop.get_selected()]
+            target_code = self.MOUSE_BTNS[target_name]
+            device = 3
+            keys = [target_code, 0, 0, 0, 0]
+            display = f"{src_name} → {target_name}"
+            
+        mapping = {
+            "btn": src_code,
+            "device": device,
+            "keys": keys,
+            "display": display
+        }
+        
+        # Check for duplicates on same src
+        self.staged_mappings = [m for m in self.staged_mappings if m["btn"] != src_code]
+        self.staged_mappings.append(mapping)
+        self.refresh_listview()
+
+    def refresh_listview(self):
+        while (row := self.list_box.get_first_child()):
+            self.list_box.remove(row)
+            
+        for m in self.staged_mappings:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, margin_start=10, margin_end=10, margin_top=5, margin_bottom=5)
+            row.append(Gtk.Label(label=m["display"], hexpand=True, halign=Gtk.Align.START))
+            del_btn = Gtk.Button(icon_name="edit-delete-symbolic")
+            del_btn.add_css_class("flat")
+            del_btn.connect("clicked", self.on_delete_mapping, m)
+            row.append(del_btn)
+            self.list_box.append(row)
+
+    def on_delete_mapping(self, btn, mapping):
+        self.staged_mappings.remove(mapping)
+        self.refresh_listview()
+
+    def on_clear_all(self, btn):
+        self.staged_mappings = []
+        self.refresh_listview()
+
+    def on_apply(self, btn):
+        # Format for IPC
+        payload = []
+        for m in self.staged_mappings:
+            payload.append({
+                "btn": m["btn"],
+                "device": m["device"],
+                "keys": m["keys"]
+            })
+        send_command("SET_CTRL_MAP " + json.dumps(payload))
 
 class SidebarWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
@@ -268,7 +639,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         self.profile_drop = Gtk.DropDown.new_from_strings(["Quiet", "Balanced", "Performance", "Custom"])
         self.profile_drop.set_selected(3) # Default Custom
-        self.profile_drop.connect("notify::selected-item", self.on_profile_changed)
+        self.profile_drop.connect("notify::selected", self.on_profile_changed)
         profile_box.append(self.profile_drop)
         
         top_split.append(profile_box)
@@ -400,7 +771,40 @@ class SidebarWindow(Adw.ApplicationWindow):
         hw_box.append(sw_row)
         content.append(hw_box)
         
-        box.append(content)
+        # --- Stack Setup ---
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_vexpand(True)
+        
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_child(content)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        
+        self.stack.add_titled(scrolled, "system", "⚙ System")
+        
+        self.ctrl_panel = ControllerPanel()
+        ctrl_scrolled = Gtk.ScrolledWindow()
+        ctrl_scrolled.set_child(self.ctrl_panel)
+        ctrl_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        
+        self.stack.add_titled(ctrl_scrolled, "controller", "🎮 Controller")
+        
+        self.remap_panel = RemappingPanel()
+        remap_scrolled = Gtk.ScrolledWindow()
+        remap_scrolled.set_child(self.remap_panel)
+        remap_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        
+        self.stack.add_titled(remap_scrolled, "remapping", "🔄 Remap")
+        
+        switcher = Gtk.StackSwitcher()
+        switcher.set_stack(self.stack)
+        switcher.set_halign(Gtk.Align.CENTER)
+        switcher.set_margin_top(10)
+        switcher.set_margin_bottom(5)
+        
+        box.append(switcher)
+        box.append(self.stack)
+        
         self.set_content(box)
 
     def _set_tele_text(self, lbl, txt):
@@ -419,6 +823,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         send_command(f"SET_TEMP {val}")
 
     def on_profile_changed(self, dropdown, obj):
+        if getattr(self, '_syncing', False): return
         idx = dropdown.get_selected()
         mapping = {0: "quiet", 1: "balanced", 2: "performance", 3: "custom"}
         profile_name = mapping.get(idx, "custom")
@@ -506,12 +911,60 @@ class SidebarWindow(Adw.ApplicationWindow):
         else:
             self.fan_hover_lbl.set_label(f"Current Point: {temp}°C at {pct}% speed")
 
-    def sync_sliders(self, tdp, temp):
-        self._syncing = True
-        self.tdp_scale.set_value(tdp)
-        self.temp_scale.set_value(temp)
-        self._syncing = False
+    def sync_sliders(self, data_str):
+        try:
+            parts = data_str.strip().split(maxsplit=1)
+            if parts[0] == "SYNC_INITIAL_JSON" and len(parts) >= 2:
+                self._syncing = True
+                state = json.loads(parts[1])
+                tdp = state.get("tdp")
+                
+                if tdp and not getattr(self, '_tdp_synced', False):
+                    if tdp == 8:
+                        self.profile_drop.set_selected(0) # quiet
+                    elif tdp == 15:
+                        self.profile_drop.set_selected(1) # balanced
+                    elif tdp == 20 or tdp == 30: # Example default perf
+                        self.profile_drop.set_selected(2) # performance
+                    else:
+                        self.profile_drop.set_selected(3) # custom
+                        self.tdp_scale.set_value(tdp)
+                    self._tdp_synced = True
+                
+                temp_lim = state.get("temp")
+                if temp_lim and not getattr(self, '_temp_synced', False):
+                    self.temp_scale.set_value(temp_lim)
+                    self._temp_synced = True
+
+                if "cpu_max_freq" in state and not getattr(self, '_cpu_f_synced', False):
+                    self.cpu_scale.set_value(state["cpu_max_freq"])
+                    self._cpu_f_synced = True
+                if "cpu_boost" in state and not getattr(self, '_cpu_b_synced', False):
+                    self.cpu_switch.set_active(state["cpu_boost"])
+                    self._cpu_b_synced = True
+                if "gpu_max_freq" in state and not getattr(self, '_gpu_f_synced', False):
+                    self.gpu_scale.set_value(state["gpu_max_freq"])
+                    self.gpu_switch.set_active(True)
+                    self._gpu_f_synced = True
+                
+                self._syncing = False
+        except Exception as e:
+            print(f"Failed to sync sliders: {e}")
+            self._syncing = False
         
+    def toggle_keyboard(self):
+        # Trigger the seamless GNOME Shell Extension via DBus
+        cmd = [
+            "dbus-send", "--session", "--type=method_call",
+            "--dest=com.shubu.LegionOSK", "/com/shubu/LegionOSK",
+            "com.shubu.LegionOSK.Toggle"
+        ]
+        try:
+            subprocess.run(cmd, check=False)
+            print("Toggled Legion OSK via DBus (Seamless)")
+        except Exception as e:
+            print(f"Failed to toggle OSK extension: {e}")
+
     def toggle_visibility(self):
         if self.get_visible():
             self.set_visible(False)

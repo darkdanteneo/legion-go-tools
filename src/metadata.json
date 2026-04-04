@@ -1,0 +1,16 @@
+{
+  "name": "Legion OSK",
+  "uuid": "legion-osk@shubu.com",
+  "description": "Seamless Legion Go On-Screen Keyboard using GJS and St (not GTK).",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49"
+  ],
+  "session-modes": [
+    "user",
+    "unlock-dialog"
+  ]
+}

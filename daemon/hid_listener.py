@@ -8,6 +8,8 @@ import sys
 import subprocess
 import threading
 import json
+import controller_hid
+# import input_mapper
 
 LEGION_PIDS = [0x6182, 0x6183, 0x6184, 0x6185, 0x61EB, 0x61EC, 0x61ED, 0x61EE]
 VID = 0x17EF
@@ -246,6 +248,19 @@ def handle_ipc_command(data_bytes, ryzenadj_path, fds):
                         print(f"Sent Profile '{profile}': {cmd_acpi} | Result: {acpi_result}")
                     else:
                         print("Error: /proc/acpi/call not found. Ensure 'acpi_call' is loaded.")
+            elif cmd == "SET_CTRL_RGB" and len(parts) >= 8:
+                r, g, b = int(parts[1]), int(parts[2]), int(parts[3])
+                mode, br, sp, side = parts[4], int(parts[5]), int(parts[6]), parts[7]
+                targets = ["LEFT", "RIGHT"] if side == "BOTH" else [side]
+                for t in targets:
+                    controller_hid.set_rgb(t, r, g, b, mode, br, sp)
+                print(f"Set RGB {side}: {mode} rgb({r},{g},{b}) br={br} sp={sp}")
+            elif cmd == "SET_CTRL_RGB_OFF" and len(parts) >= 2:
+                side = parts[1]
+                targets = ["LEFT", "RIGHT"] if side == "BOTH" else [side]
+                for t in targets:
+                    controller_hid.set_rgb_off(t)
+                print(f"Turned OFF RGB {side}")
             
             elif cmd == "SET_FAN_CURVE" and len(parts) == 11:
                 try:
@@ -346,6 +361,68 @@ def handle_ipc_command(data_bytes, ryzenadj_path, fds):
                     print(f"Successfully sent Legion swap command {val}")
                 except Exception as e:
                     print(f"Error swapping: {e}")
+
+            elif cmd == "SET_CTRL_PROFILE" and len(parts) >= 2:
+                try:
+                    prof_num = int(parts[1])
+                    # No global switch known, but we can set built-in profile state for remapped buttons
+                    # Apply remaps per profile. For now, just a placeholder.
+                    # As a simpler initial implementation, let's just use the profile commands from remapper.
+                    for btn, act in controller_hid.RemappableButtons.items():
+                        # Resend remap command to profile N
+                        if btn in ["Y3", "M2", "M3"]:
+                            controller_hid.remap_button_profile(prof_num, btn, "DISABLED")
+                        else:
+                            controller_hid.remap_button_profile(prof_num, btn, "DISABLED")
+                    print(f"Set controller profile {prof_num}")
+                except Exception as e:
+                    print(f"Failed to set profile: {e}")
+
+            elif cmd == "SET_CTRL_RGB" and len(parts) >= 8:
+                try:
+                    # SET_CTRL_RGB r g b mode brightness speed both/left/right
+                    r, g, b = int(parts[1]), int(parts[2]), int(parts[3])
+                    mode, brightness, speed = parts[4], int(parts[5]), int(parts[6])
+                    side = parts[7].upper()
+                    
+                    if side in ["BOTH", "LEFT"]:
+                        controller_hid.set_rgb("LEFT", r, g, b, mode, brightness, speed)
+                    if side in ["BOTH", "RIGHT"]:
+                        controller_hid.set_rgb("RIGHT", r, g, b, mode, brightness, speed)
+                    print(f"Set RGB {side} to {mode} {r},{g},{b}")
+                except Exception as e:
+                    print(f"Failed to set RGB: {e}")
+
+            elif cmd == "SET_CTRL_RGB_OFF" and len(parts) >= 2:
+                try:
+                    side = parts[1].upper()
+                    if side in ["BOTH", "LEFT"]: controller_hid.set_rgb_off("LEFT")
+                    if side in ["BOTH", "RIGHT"]: controller_hid.set_rgb_off("RIGHT")
+                    print(f"Set RGB OFF {side}")
+                except Exception as e:
+                    print(f"Failed to turn off RGB: {e}")
+
+            elif cmd == "REMAP_BTN" and len(parts) >= 4:
+                try:
+                    # REMAP_BTN prof_num button action
+                    prof = int(parts[1])
+                    btn = parts[2].upper()
+                    act = parts[3].upper()
+                    controller_hid.remap_button_profile(prof, btn, act)
+                    print(f"Remapped profile {prof} {btn} -> {act}")
+                except Exception as e:
+                    print(f"Failed to remap button: {e}")
+
+            elif cmd == "SET_CTRL_MAP" and len(parts) >= 2:
+                try:
+                    # SET_CTRL_MAP [{"btn":0x16, "device":0x01, "keys":[0x16,0,0,0,0]}, ...]
+                    mappings_json = line.split(maxsplit=1)[1]
+                    mappings = json.loads(mappings_json)
+                    controller_hid.apply_hardware_remapping(mappings)
+                    print(f"Applied {len(mappings)} hardware mappings.")
+                except Exception as e:
+                    print(f"Failed to apply hardware mapping: {e}")
+
     except Exception as e:
         print(f"Error handling IPC command: {e}")
 
@@ -388,6 +465,13 @@ def main():
     
     start_poller()
     
+    # # Start input virtualization mapping
+    # try:
+    #     mapper = input_mapper.InputMapper()
+    #     mapper.start()
+    # except Exception as e:
+    #     print(f"Failed to start InputMapper: {e}")
+        
     last_1 = False
     last_2 = False
 
@@ -438,10 +522,11 @@ def main():
                             CONTROLLER_R_STATUS = data[8]
                             
                             if button1 and not last_1:
-                                print(f"[HIT] Legion Button 1 (L) Pressed! (Reserved for future OSK)")
-                            if button2 and not last_2:
-                                print(f"[HIT] Legion Button 2 (R) Pressed! Broadcasting TOGGLE_SIDEBAR")
+                                print(f"[HIT] Legion Button L Pressed! Broadcasting TOGGLE_SIDEBAR")
                                 broadcast_event("TOGGLE_SIDEBAR")
+                            if button2 and not last_2:
+                                print(f"[HIT] Legion Button R Pressed! Broadcasting TOGGLE_KEYBOARD")
+                                broadcast_event("TOGGLE_KEYBOARD")
                                 
                             last_1 = button1
                             last_2 = button2

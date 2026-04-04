@@ -16,7 +16,7 @@ def send_command(cmd_str):
         except Exception as e:
             print(f"Failed to send IPC command: {e}")
 
-def listen_for_buttons(toggle_callback, sync_callback, telemetry_callback):
+def listen_for_buttons(toggle_callback, keyboard_callback, sync_callback, telemetry_callback):
     def _thread():
         global _ipc_client
         while True:
@@ -36,6 +36,8 @@ def listen_for_buttons(toggle_callback, sync_callback, telemetry_callback):
                     if line == "TOGGLE_SIDEBAR":
                         # Invoke GTK UI code back on the main GLib loop
                         GLib.idle_add(toggle_callback)
+                    elif line == "TOGGLE_KEYBOARD":
+                        GLib.idle_add(keyboard_callback)
                     elif line.startswith("SYNC_INITIAL_JSON "):
                         GLib.idle_add(sync_callback, line)
                     elif line.startswith("TELEMETRY_DATA "):
