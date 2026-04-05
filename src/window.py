@@ -13,6 +13,7 @@ try:
     HAS_LAYER_SHELL = True
 except (ValueError, ImportError):
     HAS_LAYER_SHELL = False
+    print(ValueError, ImportError) # TODO: Fix stick to right
 
 from ipc import send_command
 
@@ -590,7 +591,7 @@ class SidebarWindow(Adw.ApplicationWindow):
             Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.TOP, True)
             Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, True)
             Gtk4LayerShell.set_keyboard_mode(self, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
-
+            print("window pinned on right")
         # Inject some custom CSS to tighten everything up
         css_provider = Gtk.CssProvider()
         css_provider.load_from_data("""
@@ -638,7 +639,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         profile_box.append(prof_lbl)
         
         self.profile_drop = Gtk.DropDown.new_from_strings(["Quiet", "Balanced", "Performance", "Custom"])
-        self.profile_drop.set_selected(3) # Default Custom
+        self.profile_drop.set_selected(3) # TODO: Read correct value, Default Custom
         self.profile_drop.connect("notify::selected", self.on_profile_changed)
         profile_box.append(self.profile_drop)
         
@@ -653,7 +654,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         self.tdp_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5, 43, 1)
         self.tdp_scale.set_draw_value(False)
-        self.tdp_scale.set_value(30)
+        self.tdp_scale.set_value(30) # TODO: Read correct value, Default 30
         self.tdp_scale.connect("value-changed", self.on_tdp_changed)
         tdp_box.append(self.tdp_scale)
         content.append(tdp_box)
@@ -666,7 +667,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         self.temp_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 60, 95, 1)
         self.temp_scale.set_draw_value(False)
-        self.temp_scale.set_value(80)
+        self.temp_scale.set_value(80) # TODO: Read correct value, Default 80
         self.temp_scale.connect("value-changed", self.on_temp_changed)
         temp_box.append(self.temp_scale)
         content.append(temp_box)
@@ -676,7 +677,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         gpu_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.gpu_label = Gtk.Label(label="Custom GPU Freq: 1500 MHz", hexpand=True, halign=Gtk.Align.START)
         self.gpu_label.add_css_class("caption")
-        self.gpu_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.gpu_switch = Gtk.Switch(valign=Gtk.Align.CENTER) # TODO: Read correct value, Default False
         self.gpu_switch.add_css_class("small")
         self.gpu_switch.connect("state-set", self.on_gpu_switch_toggled)
         gpu_header.append(self.gpu_label)
@@ -685,7 +686,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         self.gpu_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 800, 2700, 50)
         self.gpu_scale.set_draw_value(False)
-        self.gpu_scale.set_value(1500)
+        self.gpu_scale.set_value(1500) # TODO: Read correct value, Default 1500
         self.gpu_scale.set_sensitive(False)
         self.gpu_scale.connect("value-changed", self.on_gpu_freq_changed)
         gpu_box.append(self.gpu_scale)
@@ -696,7 +697,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         cpu_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.cpu_label = Gtk.Label(label="CPU Boost (Max: 3300 MHz)", hexpand=True, halign=Gtk.Align.START)
         self.cpu_label.add_css_class("caption")
-        self.cpu_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.cpu_switch = Gtk.Switch(valign=Gtk.Align.CENTER) # TODO: Read correct value, Default True
         self.cpu_switch.add_css_class("small")
         self.cpu_switch.set_active(True)
         self.cpu_switch.connect("state-set", self.on_cpu_switch_toggled)
@@ -706,7 +707,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         self.cpu_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1200, 5100, 100)
         self.cpu_scale.set_draw_value(False)
-        self.cpu_scale.set_value(3300)
+        self.cpu_scale.set_value(3300) # TODO: Read correct value, Default 3300
         self.cpu_scale.connect("value-changed", self.on_cpu_freq_changed)
         cpu_box.append(self.cpu_scale)
         content.append(cpu_box)
@@ -718,7 +719,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         fan_label = Gtk.Label(label="Custom Fan Curve", hexpand=True, halign=Gtk.Align.START)
         fan_label.add_css_class("caption")
         
-        self.max_fan_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.max_fan_switch = Gtk.Switch(valign=Gtk.Align.CENTER) # TODO: Read correct value, Default False
         self.max_fan_switch.add_css_class("small")
         self.max_fan_switch.connect("state-set", self.on_max_fan_toggled)
         max_fan_lbl = Gtk.Label(label="Max", margin_end=5)
@@ -746,6 +747,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         # Single row for toggles (centered)
         sw_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=60, halign=Gtk.Align.CENTER)
         
+        # TODO: Read correct value, Default false
         def create_toggle_item(label_text, switch):
             vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             lbl = Gtk.Label(label=label_text, xalign=0.5)
@@ -857,6 +859,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         vals = [str(p) for p in points]
         send_command("SET_FAN_CURVE " + " ".join(vals))
 
+    # TODO: Not working
     def on_led_toggled(self, switch, state):
         if getattr(self, '_syncing', False): return
         val = 1 if state else 0
@@ -911,6 +914,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         else:
             self.fan_hover_lbl.set_label(f"Current Point: {temp}°C at {pct}% speed")
 
+    # TODO: Init nnot working, use system state instead of cached values
     def sync_sliders(self, data_str):
         try:
             parts = data_str.strip().split(maxsplit=1)
