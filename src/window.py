@@ -15,7 +15,7 @@ except (ValueError, ImportError):
     HAS_LAYER_SHELL = False
     print(ValueError, ImportError) # TODO: Fix stick to right
 
-from ipc import send_command
+from backend import send_command
 
 class FanCurveWidget(Gtk.DrawingArea):
     def __init__(self, callback, hover_callback=None):
@@ -451,11 +451,12 @@ class RemappingPanel(Gtk.Box):
         scroll.set_child(self.list_box)
         self.append(scroll)
         
-        # Apply/Clear
+        # Reset/Apply
         bb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        clear_btn = Gtk.Button(label="Clear All", hexpand=True)
-        clear_btn.connect("clicked", self.on_clear_all)
-        bb.append(clear_btn)
+        reset_btn = Gtk.Button(label="Reset Defaults", hexpand=True)
+        reset_btn.add_css_class("destructive-action")
+        reset_btn.connect("clicked", self.on_reset_defaults)
+        bb.append(reset_btn)
         
         apply_btn = Gtk.Button(label="Apply to Hardware", hexpand=True)
         apply_btn.add_css_class("suggested-action")
@@ -559,9 +560,23 @@ class RemappingPanel(Gtk.Box):
         self.staged_mappings.remove(mapping)
         self.refresh_listview()
 
-    def on_clear_all(self, btn):
+    def on_reset_defaults(self, btn):
         self.staged_mappings = []
         self.refresh_listview()
+        
+        # Generate an explicit 1:1 mapping for all buttons (Native behavior)
+        payload = []
+        for name, code in self.HW_BUTTONS.items():
+            # Standard buttons map to themselves; back buttons map to 0 (Disabled)
+            target = code if name not in ["Y1", "Y2", "Y3", "M2", "M3"] else 0x00
+            payload.append({
+                "btn": code,
+                "device": 1, # Controller mode
+                "keys": [target, 0, 0, 0, 0]
+            })
+            
+        # Send the full native configuration to hardware
+        send_command("SET_CTRL_MAP " + json.dumps(payload))
 
     def on_apply(self, btn):
         # Format for IPC

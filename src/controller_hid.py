@@ -98,7 +98,15 @@ DEVICE_MOUSE = 0x03
 
 RgbModes = {"SOLID": 0x01, "PULSE": 0x02, "DYNAMIC": 0x03, "SPIRAL": 0x04}
 
+_cached_paths = []
+_working_path = None
+
 def get_config_paths():
+    global _cached_paths
+    if _cached_paths:
+        return _cached_paths
+    # ... (no changes to the glob logic)
+    
     import glob
     paths = []
     for sys_path in glob.glob("/sys/class/hidraw/hidraw*"):
@@ -110,32 +118,41 @@ def get_config_paths():
                     paths.append( ("/dev/" + os.path.basename(sys_path)).encode('utf-8') )
         except Exception:
             pass
+    _cached_paths = paths
     return paths
+
+def clear_path_cache():
+    global _cached_paths
+    _cached_paths = []
 
 def send_command(command):
     return send_commands([command])
 
 def send_commands(commands):
+    global _working_path
     paths = get_config_paths()
     if not paths:
         print("Controller HID configuration device not found.")
         return False
     
-    success = False
+    # Prioritize the last confirmed working path
+    if _working_path and _working_path in paths:
+        paths = [_working_path] + [p for p in paths if p != _working_path]
+
     for path in paths:
         try:
             with Device(path=path) as device:
                 for cmd in commands:
-                    print(cmd)
                     device.write(pad_command(cmd))
-                success = True
-        except Exception as e:
-            pass # Keep trying other paths
+                # If we successfully wrote a batch, this is the right device
+                _working_path = path
+                return True 
+        except Exception:
+            continue # Try next path if this one failed
             
-    if not success:
-        print("Error: Could not write to ANY matching HID device endpoints.")
-        
-    return success
+    print("Error: Could not write to ANY matching HID device endpoints.")
+    _working_path = None # Reset if all failed
+    return False
 
 def pad_command(command):
     return bytes(command) + bytes([0x00] * (64 - len(command)))
@@ -180,37 +197,42 @@ def apply_hardware_remapping(mappings):
         "keys": [0x16, 0, 0, 0, 0] # up to 5 keys/buttons
     }
     """
-    if not mappings:
-        return
+    # Button Ownership Maps
+    LEFT_BTNS = {0x16, 0x17, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0d, 0x0e, 0x0f, 0x10, 0x1c, 0x1d, 0x23}
+    RIGHT_BTNS = {0x12, 0x13, 0x14, 0x15, 0x18, 0x19, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x1e, 0x21, 0x22, 0x24}
 
-    # Max 8 rows per 64-byte packet
-    chunks = [mappings[i:i + 8] for i in range(0, len(mappings), 8)]
-    total_chunks = len(chunks)
+    # Split mappings by controller ownership
+    for ctrl_id in [0x03, 0x04]:
+        target_btns = LEFT_BTNS if ctrl_id == 0x03 else RIGHT_BTNS
+        ctrl_mappings = [m for m in mappings if m["btn"] in target_btns]
+        
+        packets = []
+        if not ctrl_mappings:
+            # Send a clear/empty mapping list (count=0) to this controller
+            clear_data = [0x05, 0x00, 0x12, 0x0a, ctrl_id, 0x01, 0x11, 0x00]
+            packets.append(clear_data)
+        else:
+            # Max 8 rows per 64-byte packet
+            chunks = [ctrl_mappings[i:i + 8] for i in range(0, len(ctrl_mappings), 8)]
+            total_chunks = len(chunks)
+            base_data = [0x00, 0x12, 0x0a]
+            for chunk_idx, chunk in enumerate(chunks):
+                current_chunk = chunk_idx + 1
+                xx = (total_chunks << 4) | current_chunk
+                data = [0x05] + base_data + [ctrl_id, 0x01, xx, len(chunk)]
+                for m in chunk:
+                    row = [m["btn"], m["device"]] + (list(m["keys"]) + [0]*5)[:5]
+                    data.extend(row)
+                
+                # Explicitly pad to 64 bytes as requested (0x05 header + 63 body)
+                data = (data + [0]*64)[:64]
+                packets.append(data)
 
-    # Base payload structure
-    base_data = [0x00, 0x12, 0x0a]
-
-    # We send configuration to BOTH Left (0x03) and Right (0x04) logical devices
-    for ctrl_id in [0x04]:
-        for chunk_idx, chunk in enumerate(chunks):
-            current_chunk = chunk_idx + 1
-            count = len(chunk)
-            
-            # The mystery XX byte is (total_chunks << 4) | current_chunk !
-            # e.g., 1 of 1 -> 0x11, 1 of 2 -> 0x21, 2 of 2 -> 0x22
-            xx = (total_chunks << 4) | current_chunk
-
-            data = [0x05] + base_data + [ctrl_id, 0x01, xx, count]
-            for m in chunk:
-                # Each row: [btn_code, device, key0, key1, key2, key3, key4] = 7 bytes
-                row = [m["btn"], m["device"]] + (list(m["keys"]) + [0]*5)[:5]
-                data.extend(row)
-
-            padded = pad_command(data)
-
-            print(f"[HID-REMAP] Sending to Controller {ctrl_id:02x} (Chunk {current_chunk}/{total_chunks}, XX=0x{xx:02x}):")
-            for i in range(0, 64, 16):
-                hex_part = " ".join(f"{b:02x}" for b in padded[i:i+16])
-                print(f"  {i:04x}  {hex_part}")
-
-            send_command(padded)
+        if packets:
+            print(f"[HID-REMAP] Sending batch of {len(packets)} packets to Controller {ctrl_id:02x}")
+            for midx, p in enumerate(packets):
+                print(f"  Packet {midx+1}:")
+                for i in range(0, 64, 16):
+                    hex_part = " ".join(f"{b:02x}" for b in p[i:i+16])
+                    print(f"    {i:04x}  {hex_part}")
+            send_commands(packets)

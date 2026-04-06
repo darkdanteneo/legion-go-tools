@@ -12,7 +12,7 @@ import time
 import socket
 
 from window import SidebarWindow
-from ipc import listen_for_buttons
+from backend import listen_for_buttons
 
 # TODO: Make proper Init
 # def ensure_dependencies():
