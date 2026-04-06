@@ -345,3 +345,10 @@ vibration
 
 
 
+03008665ef170000eb61000000010000,Generic X-Box pad,platform:Linux,crc:6586,a:b0,b:b1,x:b2,y:b3,back:b6,start:b7,leftstick:b9,rightstick:b10,leftshoulder:b4,rightshoulder:b5,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,
+
+
+
+keyboard: ->
+when screen si rotated or resized, or display scaling changed, the keyboard does not update, it stays small/spills out of screen.
+keyboard does not work when entering admin password in apps example vscode

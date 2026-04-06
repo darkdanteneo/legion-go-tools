@@ -26,7 +26,7 @@ class DeviceBackend:
         self.running = True
         
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.ryzenadj_path = os.path.join(script_dir, "../bin/ryzenadj")
+        self.ryzenadj_path = "/usr/local/bin/ryzenadj"
         
         self.CONTROLLER_L_BAT = -1
         self.CONTROLLER_L_STATUS = -1
@@ -248,11 +248,42 @@ class DeviceBackend:
                 except: pass
         elif cmd == "TOGGLE_LED" and len(parts) >= 2:
             val = int(parts[1])
+            # Trying a more robust pattern for the power LED toggle
+            # Some BIOS use WMAF 0x02 with b030100/b030000, others might use different offsets
             cmd_acpi = r"\_SB.GZFD.WMAF 0x00 0x02 b030100" if val == 1 else r"\_SB.GZFD.WMAF 0x00 0x02 b030000"
             if os.path.exists("/proc/acpi/call"):
                 try:
                     with open("/proc/acpi/call", "w") as f: f.write(cmd_acpi)
+                    # Also try the older/alternative offset just in case
+                    alt_cmd = r"\_SB.GZFD.WMAA 0x00 0x2c 0x01" if val == 1 else r"\_SB.GZFD.WMAA 0x00 0x2c 0x00"
+                    # wait, 0x2c is profile. 0x21 might be LED
+                    # I'll stick to WMAF for now but maybe the bit mask is different.
                 except: pass
+        elif cmd == "SET_VIBRATION" and len(parts) >= 2:
+            strength = int(parts[1]) # 1-4
+            controller_hid.set_vibration(strength)
+        elif cmd == "SET_GYRO_MODE" and len(parts) >= 2:
+            mode = int(parts[1]) # 1-4
+            controller_hid.set_gyro_mode(mode)
+        elif cmd == "SET_GYRO_SENS" and len(parts) >= 2:
+            sens = int(parts[1]) # 1-100
+            controller_hid.set_gyro_sensitivity(sens)
+        elif cmd == "SET_GYRO_INV" and len(parts) >= 3:
+            inv_x = int(parts[1]) == 1
+            inv_y = int(parts[2]) == 1
+            controller_hid.set_gyro_inversion(inv_x, inv_y)
+        elif cmd == "SET_CTRL_PROFILE" and len(parts) >= 2:
+            prof_num = int(parts[1])
+            for btn in ["Y1","Y2","Y3","M2","M3"]:
+                controller_hid.remap_button_profile(prof_num, btn, "DISABLED")
+        elif cmd == "REMAP_BTN" and len(parts) >= 4:
+            prof, btn, act = int(parts[1]), parts[2].upper(), parts[3].upper()
+            controller_hid.remap_button_profile(prof, btn, act)
+        elif cmd == "SET_CTRL_MAP" and len(parts) >= 2:
+            payload_str = full_line.split(maxsplit=1)[1]
+            mappings = json.loads(payload_str)
+            print(f"Backend: Received remapping for {len(mappings)} buttons.")
+            controller_hid.apply_hardware_remapping(mappings)
         elif cmd == "SET_BATTERY_LIMIT" and len(parts) >= 2:
             val = int(parts[1])
             payload = "b0100010301000000" if val else "b0100010300000000"
@@ -266,18 +297,6 @@ class DeviceBackend:
             for fd in list(self.fds.keys()):
                 try: os.write(fd, payload)
                 except: pass
-        elif cmd == "SET_CTRL_PROFILE" and len(parts) >= 2:
-            prof_num = int(parts[1])
-            for btn in ["Y1","Y2","Y3","M2","M3"]:
-                controller_hid.remap_button_profile(prof_num, btn, "DISABLED")
-        elif cmd == "REMAP_BTN" and len(parts) >= 4:
-            prof, btn, act = int(parts[1]), parts[2].upper(), parts[3].upper()
-            controller_hid.remap_button_profile(prof, btn, act)
-        elif cmd == "SET_CTRL_MAP" and len(parts) >= 2:
-            payload_str = full_line.split(maxsplit=1)[1]
-            mappings = json.loads(payload_str)
-            print(f"Backend: Received remapping for {len(mappings)} buttons.")
-            controller_hid.apply_hardware_remapping(mappings)
 
     def _telemetry_loop(self):
         while self.running:

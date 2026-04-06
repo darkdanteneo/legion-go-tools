@@ -210,21 +210,6 @@ class ControllerPanel(Gtk.Box):
     def __init__(self, **kwargs):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15, margin_top=10, margin_start=12, margin_end=12, **kwargs)
         
-        # --- 1. Input Profile ---
-        prof_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        prof_lbl = Gtk.Label(label="Input Profile", halign=Gtk.Align.START)
-        prof_lbl.add_css_class("heading")
-        prof_box.append(prof_lbl)
-
-        grid = Gtk.Grid(row_spacing=5, column_spacing=5, halign=Gtk.Align.CENTER)
-        self.prof_btns = []
-        for i in range(1, 5):
-            btn = Gtk.Button(label=f"Profile {i}")
-            btn.connect("clicked", self.on_profile_clicked, i)
-            self.prof_btns.append(btn)
-            grid.attach(btn, (i-1)%2, (i-1)//2, 1, 1)
-        prof_box.append(grid)
-        self.append(prof_box)
 
         # --- 2. Controller LED ---
         led_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
@@ -299,40 +284,69 @@ class ControllerPanel(Gtk.Box):
 
         self.append(led_box)
 
-        # --- 3. Button Remap ---
-        remap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        remap_lbl = Gtk.Label(label="Button Remap (Current Profile)", halign=Gtk.Align.START)
-        remap_lbl.add_css_class("heading")
-        remap_box.append(remap_lbl)
+        # --- 3. Vibration Strength ---
+        vib_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        vib_lbl = Gtk.Label(label="Vibration Strength", halign=Gtk.Align.START)
+        vib_lbl.add_css_class("heading")
+        vib_box.append(vib_lbl)
 
-        actions = [
-            "DISABLED", "L_STICK_CLICK", "R_STICK_CLICK",
-            "D_PAD_UP", "D_PAD_DOWN", "D_PAD_LEFT", "D_PAD_RIGHT",
-            "BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y",
-            "L_BUMPER", "L_TRIGGER", "R_BUMPER", "R_TRIGGER",
-            "VIEW", "MENU"
-        ]
-        self.remap_drops = {}
-        self.active_profile = 1
+        vib_opts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        vib_opts.append(Gtk.Label(label="Intensity", halign=Gtk.Align.START))
+        self.vib_drop = Gtk.DropDown.new_from_strings(["Off", "Weak", "Medium", "Strong"])
+        self.vib_drop.set_selected(2) # Default Mid
+        self.vib_drop.connect("notify::selected", self.on_vib_changed)
+        vib_opts.append(self.vib_drop)
+        vib_box.append(vib_opts)
+        self.append(vib_box)
 
-        rg = Gtk.Grid(row_spacing=5, column_spacing=10)
-        for i, btn in enumerate(["Y1", "Y2", "Y3", "M2", "M3"]):
-            rg.attach(Gtk.Label(label=btn), 0, i, 1, 1)
-            drop = Gtk.DropDown.new_from_strings(actions)
-            drop.connect("notify::selected", self.on_remap_changed, btn, actions)
-            self.remap_drops[btn] = drop
-            rg.attach(drop, 1, i, 1, 1)
-        remap_box.append(rg)
+        # --- 4. Gyro Mapping ---
+        gyro_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        gyro_lbl = Gtk.Label(label="Gyro Mapping", halign=Gtk.Align.START)
+        gyro_lbl.add_css_class("heading")
+        gyro_box.append(gyro_lbl)
+
+        # Mode
+        g_mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        g_mode_box.append(Gtk.Label(label="Function", halign=Gtk.Align.START))
+        self.gyro_mode = Gtk.DropDown.new_from_strings(["Disabled", "Left Stick", "Right Stick", "Mouse"])
+        self.gyro_mode.set_selected(0)
+        self.gyro_mode.connect("notify::selected", self.on_gyro_mode_changed)
+        g_mode_box.append(self.gyro_mode)
+        gyro_box.append(g_mode_box)
+
+        # Sensitivity
+        self.gyro_sens_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.gyro_sens_lbl = Gtk.Label(label="Sensitivity: 50", halign=Gtk.Align.START)
+        self.gyro_sens_lbl.add_css_class("caption")
+        self.gyro_sens_box.append(self.gyro_sens_lbl)
+        self.gyro_sens_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 100, 1)
+        self.gyro_sens_scale.set_value(50)
+        self.gyro_sens_scale.set_draw_value(False)
+        self.gyro_sens_scale.connect("value-changed", self.on_gyro_sens_changed)
+        self.gyro_sens_box.append(self.gyro_sens_scale)
+        gyro_box.append(self.gyro_sens_box)
+
+        # Inversion
+        inv_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
         
-        self.append(remap_box)
+        inv_x_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        inv_x_box.append(Gtk.Label(label="Invert X"))
+        self.gyro_inv_x = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.gyro_inv_x.connect("state-set", self.on_gyro_inv_changed)
+        inv_x_box.append(self.gyro_inv_x)
+        inv_box.append(inv_x_box)
+        
+        inv_y_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        inv_y_box.append(Gtk.Label(label="Invert Y"))
+        self.gyro_inv_y = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.gyro_inv_y.connect("state-set", self.on_gyro_inv_changed)
+        inv_y_box.append(self.gyro_inv_y)
+        inv_box.append(inv_y_box)
+        
+        gyro_box.append(inv_box)
+        self.append(gyro_box)
 
-    def on_profile_clicked(self, btn, prof_num):
-        self.active_profile = prof_num
-        send_command(f"SET_CTRL_PROFILE {prof_num}")
-        # Color the active button
-        for b in self.prof_btns:
-            b.remove_css_class("suggested-action")
-        btn.add_css_class("suggested-action")
+
 
     def on_led_changed(self, *args):
         if not hasattr(self, 'sl_br'): return
@@ -345,9 +359,31 @@ class ControllerPanel(Gtk.Box):
     def on_led_off(self, btn):
         send_command("SET_CTRL_RGB_OFF BOTH")
 
-    def on_remap_changed(self, dropdown, pspec, btn_name, actions):
-        act = actions[dropdown.get_selected()]
-        send_command(f"REMAP_BTN {self.active_profile} {btn_name} {act}")
+    def on_vib_changed(self, dropdown, pspec):
+        # Index 0-3 -> Command values 1-4
+        strength = dropdown.get_selected() + 1
+        send_command(f"SET_VIBRATION {strength}")
+
+    def on_gyro_mode_changed(self, dropdown, pspec):
+        # Index 0-3 -> Command values 1-4
+        mode = dropdown.get_selected() + 1
+        send_command(f"SET_GYRO_MODE {mode}")
+        visible = mode > 1
+        self.gyro_sens_box.set_visible(visible)
+        self.gyro_inv_x.set_sensitive(visible)
+        self.gyro_inv_y.set_sensitive(visible)
+
+    def on_gyro_sens_changed(self, scale):
+        val = int(scale.get_value())
+        self.gyro_sens_lbl.set_label(f"Sensitivity: {val}")
+        send_command(f"SET_GYRO_SENS {val}")
+
+    def on_gyro_inv_changed(self, switch, state):
+        inv_x = 1 if self.gyro_inv_x.get_active() else 0
+        inv_y = 1 if self.gyro_inv_y.get_active() else 0
+        # This will be called for either switch, so we send both states
+        send_command(f"SET_GYRO_INV {inv_x} {inv_y}")
+        return False
 
 class RemappingPanel(Gtk.Box):
     def __init__(self, **kwargs):
@@ -589,6 +625,8 @@ class RemappingPanel(Gtk.Box):
             })
         send_command("SET_CTRL_MAP " + json.dumps(payload))
 
+
+
 class SidebarWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -812,6 +850,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         remap_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         
         self.stack.add_titled(remap_scrolled, "remapping", "🔄 Remap")
+        
         
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(self.stack)

@@ -95,7 +95,6 @@ RemapActions = {
 DEVICE_CONTROLLER = 0x01
 DEVICE_KEYBOARD = 0x02
 DEVICE_MOUSE = 0x03
-
 RgbModes = {"SOLID": 0x01, "PULSE": 0x02, "DYNAMIC": 0x03, "SPIRAL": 0x04}
 
 _cached_paths = []
@@ -177,6 +176,41 @@ def set_rgb_off(controller_name):
     cmd_off = [0x05, 0x06, 0x70, 0x02, controller, 0x00, 0x01]
     send_commands([cmd_off])
 
+def set_vibration(strength_idx):
+    """
+    strength_idx: 1 (Off), 2 (Weak), 3 (Mid), 4 (Strong)
+    """
+    # Global vibration strength command seen in decode.md
+    cmd = [0x05, 0x00, 0x06, 0x02, 0x00, strength_idx]
+    send_command(cmd)
+
+def set_gyro_mode(mode_idx):
+    """
+    mode_idx: 1 (Disable), 2 (L-Stick), 3 (R-Stick), 4 (Mouse)
+    """
+    # 0x0e 02 04 XX where 04 is right con/global?
+    cmd = [0x05, 0x00, 0x0e, 0x02, 0x04, mode_idx]
+    send_command(cmd)
+
+def set_gyro_sensitivity(sensitivity):
+    """
+    sensitivity: 1-100
+    """
+    # 0x0e 04 04 00 00 SS SS where SS is hex 01-64
+    s_hex = int(min(max(sensitivity, 1), 100))
+    cmd = [0x05, 0x00, 0x0e, 0x04, 0x04, 0x00, 0x00, s_hex, s_hex]
+    send_command(cmd)
+
+def set_gyro_inversion(invert_x, invert_y):
+    """
+    invert_x/y: bool (True for On, False for Off)
+    """
+    # 0x0e 04 04 00 00 00 00 IX IY where IX/IY is 01 (Off) or 02 (On)
+    ix = 0x02 if invert_x else 0x01
+    iy = 0x02 if invert_y else 0x01
+    cmd = [0x05, 0x00, 0x0e, 0x04, 0x04, 0x00, 0x00, 0x00, 0x00, ix, iy]
+    send_command(cmd)
+
 def remap_button_profile(profile_idx, button_name, action_name):
     """
     profile_idx: 1-4
@@ -236,3 +270,4 @@ def apply_hardware_remapping(mappings):
                     hex_part = " ".join(f"{b:02x}" for b in p[i:i+16])
                     print(f"    {i:04x}  {hex_part}")
             send_commands(packets)
+

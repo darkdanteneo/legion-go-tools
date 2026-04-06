@@ -25,6 +25,7 @@ const KC = {
     N1: 2, N2: 3, N3: 4, N4: 5, N5: 6, N6: 7, N7: 8, N8: 9, N9: 10, N0: 11,
     MINUS: 12, EQUALS: 13, SEMI: 39, QUOTE: 40, COMMA: 51, DOT: 52, SLASH: 53,
     GRAVE: 41, LEFTBRACE: 26, RIGHTBRACE: 27, BACKSLASH: 43,
+    F1: 59, F2: 60, F3: 61, F4: 62, F5: 63, F6: 64, F7: 65, F8: 66, F9: 67, F10: 68, F11: 87, F12: 88,
 };
 
 // ─── Key definition helpers ───────────────────────────────────────────────────
@@ -44,8 +45,8 @@ const LETTERS_ROWS = [
     [K('tab', '⇥', 1.5), ...[...'qwertyuiop'].map(L), K('backspace', '⌫', 1.5)],
     [K('caps', '⇪', 1.7), ...[...'asdfghjkl'].map(L), K('enter', '↵', 2.3)],
     [K('shift', '⇧', 1.3), ...[...'zxcvbnm'].map(L), K('view-sym', '?123', 1.3), K('up', '↑', 1), K('close', '✕', 1)],
-    [K('ctrl', 'Ctrl', 1.3), S(',', [KC.COMMA]), K('emoji', '😀', 1.2),
-    K('space', '', 4.1), S('.', [KC.DOT]), K('left', '←', 1), K('down', '↓', 1), K('right', '→', 1)],
+    [K('ctrl', 'Ctrl', 1.3), K('fn', 'Fn', 1.1), K('emoji', '😀', 0.9),
+    K('space', '', 3.6), S('.', [KC.DOT]), K('left', '←', 1), K('down', '↓', 1), K('right', '→', 1)],
 ];
 
 const SYMBOLS_ROWS = [
@@ -108,6 +109,7 @@ export default class LegionOSKExtension extends Extension {
         this._capsBtn = null;
         this._ctrlBtn = null;
         this._monitorsChangedId = 0;
+        this._fnActive = false;
 
         // Floating mode state
         this._floatingMode = false;
@@ -170,6 +172,10 @@ export default class LegionOSKExtension extends Extension {
                 }
             });
         }
+
+        // Connect rotation/resize listeners
+        this._geomChangedId = Main.layoutManager.connect('monitors-changed', this._onGeometryChanged.bind(this));
+        this._workareaChangedId = Main.layoutManager.connect('workareas-changed', this._onGeometryChanged.bind(this));
     }
 
     _initUI() {
@@ -183,6 +189,14 @@ export default class LegionOSKExtension extends Extension {
         if (this._monitorsChangedId) {
             Main.layoutManager.disconnect(this._monitorsChangedId);
             this._monitorsChangedId = 0;
+        }
+        if (this._geomChangedId) {
+            Main.layoutManager.disconnect(this._geomChangedId);
+            this._geomChangedId = 0;
+        }
+        if (this._workareaChangedId) {
+            Main.layoutManager.disconnect(this._workareaChangedId);
+            this._workareaChangedId = 0;
         }
         if (this._stageEventId) {
             global.stage.disconnect(this._stageEventId);
@@ -203,18 +217,44 @@ export default class LegionOSKExtension extends Extension {
 
     // ── DBus ──────────────────────────────────────────────────────────────────
     _setupDBus() {
-        this._dbus = Gio.DBusExportedObject.wrapJSObject(LegionOSKInterface, this);
-        this._dbus.export(Gio.DBus.session, '/com/shubu/LegionOSK');
-        this._nameId = Gio.DBus.session.own_name(
-            'com.shubu.LegionOSK', Gio.BusNameOwnerFlags.NONE, null, null);
+        try {
+            this._dbus = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                null,
+                'com.shubu.LegionOSK',
+                '/com/shubu/LegionOSK',
+                'com.shubu.LegionOSK',
+                null
+            );
+            this._dbus.connect('g-signal', (proxy, sender, signal, params) => {
+                if (signal === 'Toggled') this.Toggle();
+            });
+            console.log("[LegionOSK] Connected to Backend DBus bridge.");
+        } catch (e) {
+            console.error("[LegionOSK] Failed to connect to Backend DBus:", e.message);
+        }
     }
 
     _teardownDBus() {
-        if (this._nameId) { Gio.DBus.session.unown_name(this._nameId); this._nameId = null; }
-        if (this._dbus) { this._dbus.unexport(); this._dbus = null; }
+        this._dbus = null;
     }
 
     Toggle() { if (!this._chrome) return; this._visible ? this._hide() : this._show(); }
+
+    _onGeometryChanged() {
+        if (!this._visible) {
+            // If hidden, just rebuild the UI so it's ready for next show
+            this._initUI();
+            return;
+        }
+
+        // If visible, hide, rebuild, and re-show to ensure correct positioning
+        this._hide();
+        this._initUI();
+        this._show();
+        console.log("[LegionOSK] Geometry changed, keyboard refreshed.");
+    }
 
     // ── Show / Hide ───────────────────────────────────────────────────────────
     _show() {
@@ -378,7 +418,21 @@ export default class LegionOSKExtension extends Extension {
                 label = (this._capsLock !== this._shiftActive) ? kd.upper : kd.lower;
                 bg = C.key; fontSize = 17 * fontScale; break;
             case 'symbol':
-                label = kd.label; bg = C.key; break;
+                if (this._fnActive) {
+                    if (kd.label >= '0' && kd.label <= '9') {
+                        const num = parseInt(kd.label);
+                        label = num === 0 ? 'F10' : `F${num}`;
+                    } else if (kd.label === '-') {
+                        label = 'F11';
+                    } else if (kd.label === '=') {
+                        label = 'F12';
+                    } else {
+                        label = kd.label;
+                    }
+                } else {
+                    label = kd.label;
+                }
+                bg = C.key; break;
             case 'tab':
                 label = '⇥'; bg = C.mod; break;
             case 'caps':
@@ -388,6 +442,9 @@ export default class LegionOSKExtension extends Extension {
                 label = '⇧'; bg = this._shiftActive ? C.shiftOn : C.mod; break;
             case 'ctrl':
                 label = 'Ctrl'; bg = this._ctrlActive ? C.ctrlOn : C.mod;
+                fontSize = 13 * fontScale; break;
+            case 'fn':
+                label = 'Fn'; bg = this._fnActive ? C.accent : C.mod;
                 fontSize = 13 * fontScale; break;
             case 'backspace':
                 label = '⌫'; bg = C.mod; break;
@@ -600,8 +657,18 @@ export default class LegionOSKExtension extends Extension {
             }
             case 'symbol': {
                 let codes = [...kd.codes];
+                if (this._fnActive && kd.label >= '0' && kd.label <= '9') {
+                    const num = parseInt(kd.label);
+                    const fCode = num === 0 ? KC.F10 : KC[`F${num}`];
+                    codes = [fCode];
+                } else if (this._fnActive && kd.label === '-') {
+                    codes = [KC.F11];
+                } else if (this._fnActive && kd.label === '=') {
+                    codes = [KC.F12];
+                }
+
                 if (this._ctrlActive) {
-                    codes = [KC.CTRL_L, ...kd.codes];
+                    codes = [KC.CTRL_L, ...codes];
                     this._setCtrl(false);
                 }
                 this._sendKey(codes);
@@ -612,12 +679,20 @@ export default class LegionOSKExtension extends Extension {
             case 'enter': this._sendKey([KC.ENTER]); break;
             case 'space': this._sendKey([KC.SPACE]); break;
             case 'tab': this._sendKey([KC.TAB]); break;
-            case 'up': this._sendKey([KC.UP]); break;
+            case 'up':
+                if (this._fnActive) this._sendKey([KC.F11]); // Example mapping
+                else this._sendKey([KC.UP]);
+                break;
             case 'down': this._sendKey([KC.DOWN]); break;
             case 'left': this._sendKey([KC.LEFT]); break;
             case 'right': this._sendKey([KC.RIGHT]); break;
             case 'emoji':
                 this._sendKey([KC.CTRL_L, KC.DOT]);
+                break;
+            case 'fn':
+                this._fnActive = !this._fnActive;
+                this._updateFnDisplay();
+                this._updateModifierStyles();
                 break;
             case 'caps':
                 this._capsLock = !this._capsLock;
@@ -681,16 +756,34 @@ export default class LegionOSKExtension extends Extension {
         }
     }
 
+    _updateFnDisplay() {
+        // Update number row to F1-F12 labels if Fn is active
+        const layout = this._view === 'letters' ? LETTERS_ROWS : SYMBOLS_ROWS;
+        const row0 = layout[0];
+        // We need to re-build the buttons or just update labels if we cached them.
+        // For simplicity, let's just re-build the keyboard on Fn toggle if it changes labels.
+        this._buildKeyboard();
+    }
+
     // ── Key injection ─────────────────────────────────────────────────────────
     _sendKey(codes) {
+        if (!this._dbus) return;
         try {
-            const tPress = GLib.get_monotonic_time();
-            codes.forEach(c => this._inputDevice.notify_key(tPress, c, Clutter.KeyState.PRESSED));
+            codes.forEach(c => {
+                this._dbus.call_sync(
+                    'SendKey',
+                    new GLib.Variant('(ib)', [c, true]),
+                    Gio.DBusCallFlags.NONE, -1, null);
+            });
             setTimeout(() => {
                 try {
-                    const tRelease = GLib.get_monotonic_time();
-                    [...codes].reverse().forEach(c =>
-                        this._inputDevice.notify_key(tRelease, c, Clutter.KeyState.RELEASED));
+                    if (!this._dbus) return;
+                    [...codes].reverse().forEach(c => {
+                        this._dbus.call_sync(
+                            'SendKey',
+                            new GLib.Variant('(ib)', [c, false]),
+                            Gio.DBusCallFlags.NONE, -1, null);
+                    });
                 } catch (e) {
                     console.error('[LegionOSK] sendKey release error:', e.message);
                 }
@@ -701,10 +794,14 @@ export default class LegionOSKExtension extends Extension {
     }
 
     _releaseKey(codes) {
+        if (!this._dbus) return;
         try {
-            const t = GLib.get_monotonic_time();
-            [...codes].reverse().forEach(c =>
-                this._inputDevice.notify_key(t, c, Clutter.KeyState.RELEASED));
+            [...codes].reverse().forEach(c => {
+                this._dbus.call_sync(
+                    'SendKey',
+                    new GLib.Variant('(ib)', [c, false]),
+                    Gio.DBusCallFlags.NONE, -1, null);
+            });
         } catch (e) {
             console.error('[LegionOSK] releaseKey error:', e.message);
         }

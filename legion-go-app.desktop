@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Exec=python3 /home/shubu/code/lego/src/main.py
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name[en_US]=Legion Go Sidebar
+Name=Legion Go Sidebar
+Comment[en_US]=Legion Go Sidebar Application
+Comment=Legion Go Sidebar Application
+Terminal=false
+Categories=Utility;

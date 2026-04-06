@@ -1,39 +1,71 @@
 #!/bin/bash
 
 # 1. Create udev rule for Legion Go Controllers to allow non-root HID access
+# Also adds the SDL_GAMECONTROLLERCONFIG for these devices
 UDEV_RULE_FILE="/etc/udev/rules.d/99-legion-go.rules"
+SDL_STR="03008665ef170000eb61000000010000,Generic X-Box pad,platform:Linux,crc:6586,a:b0,b:b1,x:b2,y:b3,back:b6,start:b7,leftstick:b9,rightstick:b10,leftshoulder:b4,rightshoulder:b5,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,"
 
-echo "Creating udev rules for Legion Go HID devices..."
+echo "Creating udev rules for Legion Go HID devices with SDL2 config..."
 cat <<EOF | sudo tee $UDEV_RULE_FILE
-# Legion Go Controller HID devices
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6182", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6183", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6184", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6185", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61eb", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61ec", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61ed", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61ee", MODE="0666"
+# Legion Go Controller HID devices (include various PIDs)
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6180", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61e0", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6182", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6183", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6184", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="6185", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61eb", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61ec", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61ed", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61ee", MODE="0666", ENV{SDL_GAMECONTROLLERCONFIG}="$SDL_STR"
 EOF
 
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
 # 2. Handle ACPI permissions (acpi_call)
-# Note: This needs to be done every boot, or we can use a systemd-tmpfiles rule
 echo "Setting permissions for /proc/acpi/call..."
 if [ -e "/proc/acpi/call" ]; then
     sudo chmod 666 /proc/acpi/call
 else
-    echo "Warning: /proc/acpi/call not found. Is acpi_call loaded?"
+    # Try loading the module
+    sudo modprobe acpi_call 2>/dev/null
+    if [ -e "/proc/acpi/call" ]; then
+        sudo chmod 666 /proc/acpi/call
+    else
+        echo "Warning: /proc/acpi/call not found. acpi_call module might be missing."
+    fi
 fi
 
 # 3. RyzenAdj permissions
-RYZENADJ_PATH=$(realpath "$(dirname "$0")/bin/ryzenadj")
+RYZENADJ_PATH="/usr/local/bin/ryzenadj"
 if [ -f "$RYZENADJ_PATH" ]; then
-    echo "Setting SUID bit on ryzenadj..."
+    echo "Setting SUID bit on $RYZENADJ_PATH..."
     sudo chown root:root "$RYZENADJ_PATH"
     sudo chmod +s "$RYZENADJ_PATH"
 fi
 
-echo "Permissions setup complete! You should now be able to run as a normal user."
+# 4. CPU/GPU Frequency Control Permissions
+echo "Setting permissions for CPU and GPU control..."
+# GPU
+for f in /sys/class/drm/card*/device/power_dpm_force_performance_level /sys/class/drm/card*/device/pp_od_clk_voltage; do
+    [ -e "$f" ] && sudo chmod 666 "$f"
+done
+
+# CPU Boost
+for f in /sys/devices/system/cpu/amd_pstate/cpb_boost /sys/devices/system/cpu/cpufreq/boost; do
+    [ -e "$f" ] && sudo chmod 666 "$f"
+done
+
+# CPU Max Freq
+for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
+    [ -e "$f" ] && sudo chmod 666 "$f"
+done
+
+# 5. Set SDL2 Controller String system-wide (for non-udev apps)
+if ! grep -q "SDL_GAMECONTROLLERCONFIG" /etc/environment; then
+    echo "Adding SDL_GAMECONTROLLERCONFIG to /etc/environment..."
+    echo "SDL_GAMECONTROLLERCONFIG=\"$SDL_STR\"" | sudo tee -a /etc/environment
+fi
+
+echo "Permissions setup complete!"
