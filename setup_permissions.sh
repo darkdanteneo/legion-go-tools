@@ -45,10 +45,15 @@ if [ -f "$RYZENADJ_PATH" ]; then
     sudo chmod +s "$RYZENADJ_PATH"
 fi
 
-# 4. CPU/GPU Frequency Control Permissions
-echo "Setting permissions for CPU and GPU control..."
+# 4. CPU/GPU/Display Frequency & Brightness Control Permissions
+echo "Setting permissions for hardware control..."
 # GPU
 for f in /sys/class/drm/card*/device/power_dpm_force_performance_level /sys/class/drm/card*/device/pp_od_clk_voltage; do
+    [ -e "$f" ] && sudo chmod 666 "$f"
+done
+
+# Backlight
+for f in /sys/class/backlight/*/brightness; do
     [ -e "$f" ] && sudo chmod 666 "$f"
 done
 
@@ -68,4 +73,46 @@ if ! grep -q "SDL_GAMECONTROLLERCONFIG" /etc/environment; then
     echo "SDL_GAMECONTROLLERCONFIG=\"$SDL_STR\"" | sudo tee -a /etc/environment
 fi
 
-echo "Permissions setup complete!"
+# 6. Legion Go Accelerometer Orientation Fix (required for auto-rotation)
+echo "Setting up accelerometer hwdb rule..."
+sudo mkdir -p /etc/udev/hwdb.d
+cat <<EOF | sudo tee /etc/udev/hwdb.d/99-legion-go-accel.hwdb
+sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnLENOVO:pn83E1:*
+ ACCEL_MOUNT_MATRIX=1,0,0;0,1,0;0,0,1
+EOF
+sudo systemd-hwdb update
+sudo udevadm trigger
+
+# 7. Libinput Quirks (prevent input suppression in tablet mode)
+echo "Setting up libinput quirks for tablet mode..."
+QUIRKS_DIR="/etc/libinput"
+sudo mkdir -p "$QUIRKS_DIR"
+cat <<EOF | sudo tee "$QUIRKS_DIR/local-overrides.quirks"
+# Prevent these input devices from being disabled by libinput when entering tablet mode.
+
+[Volume Keys]
+MatchBus=ps2
+MatchVendor=0x0001
+MatchProduct=0x0001
+ModelTabletModeNoSuspend=1
+
+[Legion Controller]
+MatchBus=usb
+MatchVendor=0x17EF
+MatchProduct=0x6184
+ModelTabletModeNoSuspend=1
+
+[Legion Controller Connected]
+MatchBus=usb
+MatchVendor=0x17EF
+MatchProduct=0x6182
+ModelTabletModeNoSuspend=1
+EOF
+
+# 8. Uinput permissions (for virtual SW_TABLET_MODE device)
+echo "Setting permissions for /dev/uinput..."
+if [ -e "/dev/uinput" ]; then
+    sudo chmod 666 /dev/uinput
+fi
+
+echo "Permissions and hardware fixes setup complete!"

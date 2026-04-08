@@ -217,6 +217,23 @@ export default class LegionOSKExtension extends Extension {
 
     // ── DBus ──────────────────────────────────────────────────────────────────
     _setupDBus() {
+        // 1. Export our interface so external apps can call Toggle()
+        try {
+            this._dbusImpl = Gio.DBusExportedObject.wrapJSObject(LegionOSKInterface, this);
+            this._dbusImpl.export(Gio.DBus.session, '/com/shubu/LegionOSK');
+
+            this._dbusNameId = Gio.DBus.session.own_name(
+                'com.shubu.LegionOSK',
+                Gio.BusNameOwnerFlags.NONE,
+                null,
+                null
+            );
+            console.log("[LegionOSK] Exported DBus interface com.shubu.LegionOSK");
+        } catch (e) {
+            console.error("[LegionOSK] Failed to export DBus interface:", e.message);
+        }
+
+        // 2. Connect as client to the backend/bridge (required for SendKey)
         try {
             this._dbus = Gio.DBusProxy.new_for_bus_sync(
                 Gio.BusType.SESSION,
@@ -230,13 +247,21 @@ export default class LegionOSKExtension extends Extension {
             this._dbus.connect('g-signal', (proxy, sender, signal, params) => {
                 if (signal === 'Toggled') this.Toggle();
             });
-            console.log("[LegionOSK] Connected to Backend DBus bridge.");
+            console.log("[LegionOSK] Connected to Backend DBus bridge proxy.");
         } catch (e) {
-            console.error("[LegionOSK] Failed to connect to Backend DBus:", e.message);
+            console.error("[LegionOSK] Failed to connect to Backend DBus proxy:", e.message);
         }
     }
 
     _teardownDBus() {
+        if (this._dbusImpl) {
+            this._dbusImpl.unexport();
+            this._dbusImpl = null;
+        }
+        if (this._dbusNameId) {
+            Gio.DBus.session.unown_name(this._dbusNameId);
+            this._dbusNameId = 0;
+        }
         this._dbus = null;
     }
 

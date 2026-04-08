@@ -2,10 +2,14 @@ import os
 import glob
 import time
 import json
+import struct
+import ctypes
+import fcntl
 import subprocess
 import threading
 import select
 import collections
+import math
 from gi.repository import GLib
 
 import controller_hid
@@ -35,6 +39,30 @@ class DeviceBackend:
         
         self.fds = {}
         self._find_hid_devices()
+        
+        self.sensor_debug = False
+        self.last_sensor_log = 0
+        self.accel_x = "/sys/bus/iio/devices/iio:device0/in_accel_x_raw"
+        self.accel_y = "/sys/bus/iio/devices/iio:device0/in_accel_y_raw"
+        self.accel_z = "/sys/bus/iio/devices/iio:device0/in_accel_z_raw"
+        self.lux_path = "/sys/bus/iio/devices/iio:device2/in_illuminance_raw"
+        
+        # Auto-brightness state
+        self.auto_brightness_enabled = False
+        self.last_auto_br_value = -1
+        self.smoothed_brightness = -1.0  # EMA-smoothed target brightness
+        
+        # Auto-rotation uinput state
+        self.auto_rotation_enabled = False
+        self.uinput_fd = None
+        self._setup_uinput()
+        
+        # Track current display state for partial updates
+        self.current_res_w = 2560
+        self.current_res_h = 1600
+        self.current_rate = 144
+        self.current_scale = 2.5
+        self.current_rot = 0
         
         self.worker_thread = threading.Thread(target=self._command_worker, daemon=True)
         self.worker_thread.start()
@@ -167,6 +195,145 @@ class DeviceBackend:
                 if self.pending_commands:
                     print(f"Backend: {len(self.pending_commands)} items already queued for next batch.")
 
+    # --- Uinput for SW_TABLET_MODE ---
+    def _setup_uinput(self):
+        """Create a virtual input device that emits SW_TABLET_MODE."""
+        try:
+            # uinput ioctl constants
+            UI_SET_EVBIT  = 0x40045564  # _IOW('U', 100, int)
+            UI_SET_SWBIT  = 0x4004556D  # _IOW('U', 109, int)
+            UI_DEV_CREATE = 0x5501
+            UI_DEV_DESTROY = 0x5502
+            EV_SW = 0x05
+            SW_TABLET_MODE = 0x01
+            
+            fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+            
+            # Set event bits
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_SW)
+            fcntl.ioctl(fd, UI_SET_SWBIT, SW_TABLET_MODE)
+            
+            # uinput_user_dev struct: name[80], id{bustype,vendor,product,version}, ff_effects_max, absmax[64], absmin[64], absfuzz[64], absflat[64]
+            name = b"legion-go-tablet-switch" + b"\x00" * (80 - len(b"legion-go-tablet-switch"))
+            # id: bustype=BUS_VIRTUAL(0x06), vendor=0x1234, product=0x5678, version=1
+            dev_id = struct.pack("HHHH", 0x06, 0x1234, 0x5678, 0x01)
+            ff_effects = struct.pack("i", 0)
+            abs_arrays = b"\x00" * (4 * 64 * 4)  # 4 arrays of 64 ints
+            
+            setup = name + dev_id + ff_effects + abs_arrays
+            os.write(fd, setup)
+            fcntl.ioctl(fd, UI_DEV_CREATE)
+            
+            self.uinput_fd = fd
+            print("Backend: Created virtual SW_TABLET_MODE uinput device.")
+        except Exception as e:
+            print(f"Backend: Failed to create uinput device: {e}")
+            print("Backend: Auto-rotation will not work. Ensure /dev/uinput is accessible.")
+            self.uinput_fd = None
+
+    def _emit_tablet_mode(self, tablet_mode_on):
+        """Emit SW_TABLET_MODE event via uinput."""
+        if self.uinput_fd is None:
+            return
+        try:
+            EV_SW = 0x05
+            EV_SYN = 0x00
+            SW_TABLET_MODE = 0x01
+            SYN_REPORT = 0x00
+            
+            now = time.time()
+            sec = int(now)
+            usec = int((now - sec) * 1e6)
+            
+            # input_event struct: time_sec, time_usec, type, code, value
+            # On 64-bit: struct timeval is 2x long (8 bytes each), then 2x unsigned short, 1x int
+            event = struct.pack("llHHi", sec, usec, EV_SW, SW_TABLET_MODE, 1 if tablet_mode_on else 0)
+            os.write(self.uinput_fd, event)
+            
+            # SYN_REPORT
+            syn = struct.pack("llHHi", sec, usec, EV_SYN, SYN_REPORT, 0)
+            os.write(self.uinput_fd, syn)
+            
+            print(f"Backend: SW_TABLET_MODE = {1 if tablet_mode_on else 0}")
+        except Exception as e:
+            print(f"Backend: Failed to emit tablet mode: {e}")
+
+    # --- Auto-brightness ---
+    def _lux_to_brightness(self, lux):
+        """Map lux reading to brightness percentage (3-100) with a fine curve."""
+        if lux <= 0:
+            return 3
+        elif lux >= 800:
+            return 100
+        else:
+            # Smooth logarithmic curve with wider range
+            normalized = math.log(lux + 1) / math.log(801)
+            return max(3, min(100, int(3 + normalized * 97)))
+
+    def _set_backlight_pct(self, pct):
+        """Set backlight brightness as a percentage (0-100)."""
+        for path in glob.glob("/sys/class/backlight/*/brightness"):
+            try:
+                with open(path.replace("brightness", "max_brightness")) as f:
+                    max_b = int(f.read().strip())
+                min_b = max(1, int(max_b * 0.01))
+                target = max(min_b, int(max_b * pct / 100))
+                with open(path, "w") as f:
+                    f.write(str(target))
+            except: pass
+
+    def _apply_display_config(self, w, h, r, rot, scale=None):
+        try:
+            if scale is None:
+                scale = self.current_scale
+            
+            # 1. Get State
+            p = subprocess.run(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig", "-o", "/org/gnome/Mutter/DisplayConfig", "-m", "org.gnome.Mutter.DisplayConfig.GetCurrentState"], capture_output=True, text=True)
+            if p.returncode != 0: return
+            serial = p.stdout.split("uint32 ")[1].split(",")[0].strip()
+            
+            # Mutter mode IDs are in native portrait format.
+            MODE_MAP = {
+                (2560, 1600, 144): "2560x1600@143.999",
+                (2560, 1600, 60):  "2560x1600@60.000",
+                (1920, 1200, 144): "1200x1600@143.999",
+                (1920, 1200, 60):  "1200x1600@143.999",
+                (1440, 900, 144):  "900x1440@143.999",
+                (1440, 900, 60):   "900x1440@143.999",
+                (1280, 800, 144):  "800x1280@143.999",
+                (1280, 800, 60):   "800x1280@143.999",
+            }
+            
+            # Valid scales reported by Mutter for each resolution
+            VALID_SCALES = {
+                (2560, 1600): [1.0, 1.25, 1.333, 1.667, 2.0, 2.5, 2.667],
+                (1920, 1200): [1.0, 1.25, 1.333, 1.667, 2.0],
+                (1440, 900):  [1.0, 1.25, 1.333, 1.5, 1.667],
+                (1280, 800):  [1.0, 1.25, 1.333],
+            }
+            
+            # Clamp scale to nearest valid value for this resolution
+            valid = VALID_SCALES.get((w, h), [1.0])
+            scale = min(valid, key=lambda s: abs(s - scale))
+            
+            mode_id = MODE_MAP.get((w, h, r))
+            if not mode_id:
+                mode_id = MODE_MAP.get((w, h, 144), "2560x1600@143.999")
+            
+            cmd = f"gdbus call --session --dest org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/DisplayConfig -m org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig {serial} 2 \"[(0, 0, {scale}, uint32 {rot}, true, [('eDP-1', '{mode_id}', @a{{sv}} {{}})])]\" \"@a{{sv}} {{}}\""
+            subprocess.run(cmd, shell=True, check=False)
+            
+            # Save current state
+            self.current_res_w = w
+            self.current_res_h = h
+            self.current_rate = r
+            self.current_scale = scale
+            self.current_rot = rot
+            
+            print(f"Backend: Applied Display Config {w}x{h}@{r}Hz Scale:{scale} Rot:{rot}")
+        except Exception as e:
+            print(f"DisplayConfig Error: {e}")
+
     def _handle_single_command(self, cmd, parts, full_line):
         ryzenadj_path = self.ryzenadj_path
         if cmd == "SET_TDP" and len(parts) >= 2:
@@ -291,6 +458,43 @@ class DeviceBackend:
                 try:
                     with open("/proc/acpi/call", "w") as f: f.write(f"\\_SB.GZFD.WMAE 0x00 0x12 {payload}")
                 except: pass
+        elif cmd == "SET_BRIGHTNESS" and len(parts) >= 2:
+            val = int(parts[1]) # 0-100
+            self._set_backlight_pct(val)
+        elif cmd == "SET_AUTO_BRIGHTNESS" and len(parts) >= 2:
+            val = int(parts[1])
+            self.auto_brightness_enabled = (val == 1)
+            self.sensor_debug = (val == 1)
+            if not self.auto_brightness_enabled:
+                self.last_auto_br_value = -1  # Reset so manual slider works immediately
+        elif cmd == "SET_RESOLUTION" and len(parts) >= 3:
+            w, h = int(parts[1]), int(parts[2])
+            self._apply_display_config(w, h, self.current_rate, self.current_rot)
+        elif cmd == "SET_REFRESH" and len(parts) >= 2:
+            r = int(parts[1])
+            self._apply_display_config(self.current_res_w, self.current_res_h, r, self.current_rot)
+        elif cmd == "SET_SCALING" and len(parts) >= 2:
+            scale = float(parts[1])
+            self._apply_display_config(self.current_res_w, self.current_res_h, self.current_rate, self.current_rot, scale)
+        elif cmd == "SET_ROTATION" and len(parts) >= 2:
+            val = int(parts[1])
+            rot_map = {0: 0, 90: 1, 180: 2, 270: 3}
+            rot = rot_map.get(val, 0)
+            subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "true"], check=False)
+            self._apply_display_config(self.current_res_w, self.current_res_h, self.current_rate, rot)
+        elif cmd == "SET_AUTO_ROTATION" and len(parts) >= 2:
+            enabled = int(parts[1]) == 1
+            self.auto_rotation_enabled = enabled
+            self.sensor_debug = enabled
+            if enabled:
+                # Enable: enter tablet mode, unlock orientation
+                subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "false"], check=False)
+                self._emit_tablet_mode(True)
+            else:
+                # Disable: lock at current orientation, but DON'T leave tablet mode
+                # (leaving tablet mode causes Mutter to reset to native portrait)
+                # Just lock orientation so GNOME stops rotating
+                subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "true"], check=False)
         elif cmd == "SET_LEGION_SWAP" and len(parts) >= 2:
             val = int(parts[1])
             payload = bytes([0x05, 0x06, 0x69, 0x04, 0x01, 0x02 if val else 0x01, 0x01])
@@ -351,9 +555,52 @@ class DeviceBackend:
                 
                 if self.telemetry_callback:
                     GLib.idle_add(self.telemetry_callback, payload)
+                
+                # Sensor Debug Logging & Auto-Brightness (1s interval)
+                curr = time.time()
+                if curr - self.last_sensor_log > 0.5:
+                    try:
+                        lx_val = None
+                        if os.path.exists(self.lux_path):
+                            with open(self.lux_path) as f:
+                                lx_str = f.read().strip()
+                                try: lx_val = int(lx_str)
+                                except: pass
+                        
+                        if self.sensor_debug:
+                            ax, ay, az = "N/A", "N/A", "N/A"
+                            if os.path.exists(self.accel_x):
+                                with open(self.accel_x) as f: ax = f.read().strip()
+                            if os.path.exists(self.accel_y):
+                                with open(self.accel_y) as f: ay = f.read().strip()
+                            if os.path.exists(self.accel_z):
+                                with open(self.accel_z) as f: az = f.read().strip()
+                            print(f"DEBUG SENSORS: Lux={lx_val} | Accel X={ax} Y={ay} Z={az}")
+                        
+                        # Auto-brightness: smooth transition using EMA
+                        if self.auto_brightness_enabled and lx_val is not None:
+                            raw_target = self._lux_to_brightness(lx_val)
+                            
+                            if self.smoothed_brightness < 0:
+                                self.smoothed_brightness = float(raw_target)
+                            else:
+                                # Exponential moving average: alpha=0.3 for smooth transitions
+                                self.smoothed_brightness = 0.3 * raw_target + 0.7 * self.smoothed_brightness
+                            
+                            # Apply in small steps (max 3% change per tick) for gradual fade
+                            final = int(self.smoothed_brightness)
+                            if self.last_auto_br_value < 0:
+                                self.last_auto_br_value = final
+                            step = max(-3, min(3, final - self.last_auto_br_value))
+                            if step != 0:
+                                self.last_auto_br_value += step
+                                self._set_backlight_pct(self.last_auto_br_value)
+                        
+                        self.last_sensor_log = curr
+                    except: pass
             except Exception as e:
                 pass
-            time.sleep(2)
+            time.sleep(0.5 if self.auto_brightness_enabled else 2)
 
     def _hid_loop(self):
         last_1, last_2 = False, False

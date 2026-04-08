@@ -208,7 +208,7 @@ class FanCurveWidget(Gtk.DrawingArea):
 
 class ControllerPanel(Gtk.Box):
     def __init__(self, **kwargs):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15, margin_top=10, margin_start=12, margin_end=12, **kwargs)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_start=10, margin_end=10, **kwargs)
         
 
         # --- 2. Controller LED ---
@@ -627,6 +627,140 @@ class RemappingPanel(Gtk.Box):
 
 
 
+class DisplayPanel(Gtk.Box):
+    def __init__(self, **kwargs):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_start=10, margin_end=10, **kwargs)
+        
+        # --- 1. Brightness ---
+        br_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        br_lbl = Gtk.Label(label="Brightness", halign=Gtk.Align.START)
+        br_lbl.add_css_class("heading")
+        br_box.append(br_lbl)
+        
+        br_ctrl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        self.br_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.br_scale.set_draw_value(False)
+        self.br_scale.set_hexpand(True)
+        # Read current backlight value for initial sync
+        self.br_scale.set_value(self._read_current_brightness())
+        self.br_scale.connect("value-changed", self.on_br_changed)
+        br_ctrl.append(self.br_scale)
+        
+        br_ctrl.append(Gtk.Label(label="Auto"))
+        self.br_auto = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.br_auto.connect("state-set", self.on_br_auto_toggled)
+        br_ctrl.append(self.br_auto)
+        br_box.append(br_ctrl)
+        self.append(br_box)
+
+        # --- 2. Resolution & Refresh ---
+        res_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        res_lbl = Gtk.Label(label="Resolution & Refresh", halign=Gtk.Align.START)
+        res_lbl.add_css_class("heading")
+        res_box.append(res_lbl)
+        
+        r_grid = Gtk.Grid(row_spacing=5, column_spacing=5)
+        r_grid.attach(Gtk.Label(label="Res", halign=Gtk.Align.START), 0, 0, 1, 1)
+        self.res_drop = Gtk.DropDown.new_from_strings(["2560×1600", "1920×1200", "1440×900", "1280×800"])
+        self.res_drop.connect("notify::selected", self.on_res_changed)
+        r_grid.attach(self.res_drop, 1, 0, 1, 1)
+        
+        r_grid.attach(Gtk.Label(label="FPS", halign=Gtk.Align.START), 0, 1, 1, 1)
+        self.fps_drop = Gtk.DropDown.new_from_strings(["60 Hz", "144 Hz"])
+        self.fps_drop.set_selected(1)  # Default 144Hz
+        self.fps_drop.connect("notify::selected", self.on_fps_changed)
+        r_grid.attach(self.fps_drop, 1, 1, 1, 1)
+        res_box.append(r_grid)
+        self.append(res_box)
+
+        # --- 3. Scaling ---
+        scale_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        scale_lbl = Gtk.Label(label="Display Scaling", halign=Gtk.Align.START)
+        scale_lbl.add_css_class("heading")
+        scale_box.append(scale_lbl)
+        
+        scale_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        scale_row.append(Gtk.Label(label="Scale", halign=Gtk.Align.START))
+        self.scale_drop = Gtk.DropDown.new_from_strings(["100%", "125%", "150%", "200%", "250%"])
+        self.scale_drop.set_selected(4)  # Default 250% (native)
+        self.scale_drop.connect("notify::selected", self.on_scale_changed)
+        scale_row.append(self.scale_drop)
+        scale_box.append(scale_row)
+        self.append(scale_box)
+
+        # --- 4. Rotation ---
+        rot_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        rot_lbl = Gtk.Label(label="Rotation", halign=Gtk.Align.START)
+        rot_lbl.add_css_class("heading")
+        rot_box.append(rot_lbl)
+        
+        auto_rot_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        auto_rot_box.append(Gtk.Label(label="Auto Rotate", hexpand=True, halign=Gtk.Align.START))
+        self.auto_rot_sw = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.auto_rot_sw.connect("state-set", self.on_auto_rot_toggled)
+        auto_rot_box.append(self.auto_rot_sw)
+        rot_box.append(auto_rot_box)
+        
+        self.rot_grid = Gtk.Grid(row_spacing=5, column_spacing=5, halign=Gtk.Align.CENTER)
+        rot_opts = [("0°", 0), ("90°", 90), ("180°", 180), ("270°", 270)]
+        for i, (lbl, val) in enumerate(rot_opts):
+            btn = Gtk.Button(label=lbl)
+            btn.connect("clicked", self.on_rot_clicked, val)
+            self.rot_grid.attach(btn, i % 2, i // 2, 1, 1)
+        rot_box.append(self.rot_grid)
+        self.append(rot_box)
+
+    def _read_current_brightness(self):
+        """Read current backlight percentage for initial slider sync."""
+        import glob as _glob
+        for path in _glob.glob("/sys/class/backlight/*/brightness"):
+            try:
+                with open(path) as f:
+                    cur = int(f.read().strip())
+                with open(path.replace("brightness", "max_brightness")) as f:
+                    mx = int(f.read().strip())
+                return int(100 * cur / mx)
+            except: pass
+        return 50
+
+    def on_br_changed(self, scale):
+        val = int(scale.get_value())
+        send_command(f"SET_BRIGHTNESS {val}")
+
+    def on_br_auto_toggled(self, sw, state):
+        send_command(f"SET_AUTO_BRIGHTNESS {1 if state else 0}")
+        self.br_scale.set_sensitive(not state)
+        return False
+
+    def on_res_changed(self, dropdown, pspec):
+        res_map = [
+            (2560, 1600),  # 2560×1600
+            (1920, 1200),  # 1920×1200
+            (1440, 900),   # 1440×900
+            (1280, 800),   # 1280×800
+        ]
+        w, h = res_map[dropdown.get_selected()]
+        send_command(f"SET_RESOLUTION {w} {h}")
+
+    def on_fps_changed(self, dropdown, pspec):
+        fps = [60, 144][dropdown.get_selected()]
+        send_command(f"SET_REFRESH {fps}")
+
+    def on_scale_changed(self, dropdown, pspec):
+        scales = [1.0, 1.25, 1.5, 2.0, 2.5]
+        scale = scales[dropdown.get_selected()]
+        send_command(f"SET_SCALING {scale}")
+
+    def on_auto_rot_toggled(self, sw, state):
+        send_command(f"SET_AUTO_ROTATION {1 if state else 0}")
+        # Disable manual rotation buttons when auto-rotate is on
+        self.rot_grid.set_sensitive(not state)
+        return False
+
+    def on_rot_clicked(self, btn, val):
+        send_command(f"SET_ROTATION {val}")
+        self.auto_rot_sw.set_active(False)
+
 class SidebarWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -634,7 +768,8 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         # True Sidebar styling: borderless, full height
         self.set_decorated(False)
-        self.set_default_size(350, 1080)
+        self.set_default_size(250, 1080)
+        self.set_size_request(250, -1)
         self.add_css_class("sidebar")
 
         if HAS_LAYER_SHELL:
@@ -648,18 +783,22 @@ class SidebarWindow(Adw.ApplicationWindow):
         # Inject some custom CSS to tighten everything up
         css_provider = Gtk.CssProvider()
         css_provider.load_from_data("""
-            .micro-caption { font-size: 11px; font-weight: bold; margin: 0; padding: 0; }
-            .dim-label { font-size: 10px; }
-            .caption { font-size: 11px; margin: 0; padding: 0; }
+            .sidebar { background-color: @window_bg_color; border-left: 1px solid @borders; }
+            stackswitcher { margin-bottom: 5px; padding: 0; }
+            stackswitcher button { padding: 4px 2px; min-width: 38px; border-radius: 0; margin: 0; border: none; }
+            stackswitcher button:checked { background: @view_bg_color; border-bottom: 2px solid #ff4400; }
+            .heading { font-weight: bold; font-size: 12px; color: @window_fg_color; margin-top: 4px; }
+            .caption { font-size: 10px; color: alpha(@window_fg_color, 0.7); }
             scale contents { min-height: 4px; padding: 0; margin: 0; }
             scale slider { min-height: 12px; min-width: 12px; margin: -2px 0; }
-            switch { margin: 0; padding: 0; }
+            dropdown { font-size: 11px; min-height: 22px; padding: 2px; }
+            switch { transform: scale(0.7); margin: 0; padding: 0; }
         """.encode())
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         # Reduced padding and margins 
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5, margin_top=5, margin_start=12, margin_end=12)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4, margin_start=8, margin_end=8)
 
         # Top Split: Telemetry (Left) and Profile (Right)
         top_split = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -835,21 +974,27 @@ class SidebarWindow(Adw.ApplicationWindow):
         scrolled.set_child(content)
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         
-        self.stack.add_titled(scrolled, "system", "⚙ System")
+        self.stack.add_titled(scrolled, "system", "⚙️")
         
         self.ctrl_panel = ControllerPanel()
         ctrl_scrolled = Gtk.ScrolledWindow()
         ctrl_scrolled.set_child(self.ctrl_panel)
         ctrl_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         
-        self.stack.add_titled(ctrl_scrolled, "controller", "🎮 Controller")
+        self.stack.add_titled(ctrl_scrolled, "controller", "🎮")
+
+        self.display_panel = DisplayPanel()
+        disp_scrolled = Gtk.ScrolledWindow()
+        disp_scrolled.set_child(self.display_panel)
+        disp_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.stack.add_titled(disp_scrolled, "display", "🖥️")
         
         self.remap_panel = RemappingPanel()
         remap_scrolled = Gtk.ScrolledWindow()
         remap_scrolled.set_child(self.remap_panel)
         remap_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         
-        self.stack.add_titled(remap_scrolled, "remapping", "🔄 Remap")
+        self.stack.add_titled(remap_scrolled, "remapping", "🔄")
         
         
         switcher = Gtk.StackSwitcher()
@@ -1019,7 +1164,7 @@ class SidebarWindow(Adw.ApplicationWindow):
         ]
         try:
             subprocess.run(cmd, check=False)
-            print("Toggled Legion OSK via DBus (Seamless)")
+            print(f"Toggled Legion OSK via DBus (Seamless): {cmd}")
         except Exception as e:
             print(f"Failed to toggle OSK extension: {e}")
 
