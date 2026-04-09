@@ -1,7 +1,7 @@
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk
+from gi.repository import Gtk, Adw, Gdk, GLib
 import json
 import time
 import os
@@ -304,15 +304,32 @@ class ControllerPanel(Gtk.Box):
         gyro_lbl = Gtk.Label(label="Gyro Mapping", halign=Gtk.Align.START)
         gyro_lbl.add_css_class("heading")
         gyro_box.append(gyro_lbl)
+        
+        c_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        c_box.append(Gtk.Label(label="Controller", halign=Gtk.Align.START))
+        self.gyro_ctrl = Gtk.DropDown.new_from_strings(["Left Controller", "Right Controller"])
+        self.gyro_ctrl.set_selected(1)
+        self.gyro_ctrl.connect("notify::selected", self.on_gyro_ui_changed)
+        c_box.append(self.gyro_ctrl)
+        gyro_box.append(c_box)
 
         # Mode
         g_mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         g_mode_box.append(Gtk.Label(label="Function", halign=Gtk.Align.START))
         self.gyro_mode = Gtk.DropDown.new_from_strings(["Disabled", "Left Stick", "Right Stick", "Mouse"])
         self.gyro_mode.set_selected(0)
-        self.gyro_mode.connect("notify::selected", self.on_gyro_mode_changed)
+        self.gyro_mode.connect("notify::selected", self.on_gyro_ui_changed)
         g_mode_box.append(self.gyro_mode)
         gyro_box.append(g_mode_box)
+
+        # Type (instant/continuous)
+        self.gyro_type_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.gyro_type_box.append(Gtk.Label(label="Style", halign=Gtk.Align.START))
+        self.gyro_type = Gtk.DropDown.new_from_strings(["Instant", "Continuous"])
+        self.gyro_type.set_selected(0)
+        self.gyro_type.connect("notify::selected", self.on_gyro_ui_changed)
+        self.gyro_type_box.append(self.gyro_type)
+        gyro_box.append(self.gyro_type_box)
 
         # Sensitivity
         self.gyro_sens_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -322,7 +339,7 @@ class ControllerPanel(Gtk.Box):
         self.gyro_sens_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 100, 1)
         self.gyro_sens_scale.set_value(50)
         self.gyro_sens_scale.set_draw_value(False)
-        self.gyro_sens_scale.connect("value-changed", self.on_gyro_sens_changed)
+        self.gyro_sens_scale.connect("value-changed", self.on_gyro_ui_changed)
         self.gyro_sens_box.append(self.gyro_sens_scale)
         gyro_box.append(self.gyro_sens_box)
 
@@ -332,21 +349,41 @@ class ControllerPanel(Gtk.Box):
         inv_x_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         inv_x_box.append(Gtk.Label(label="Invert X"))
         self.gyro_inv_x = Gtk.Switch(valign=Gtk.Align.CENTER)
-        self.gyro_inv_x.connect("state-set", self.on_gyro_inv_changed)
+        self.gyro_inv_x.connect("state-set", self.on_gyro_sw_changed)
         inv_x_box.append(self.gyro_inv_x)
         inv_box.append(inv_x_box)
         
         inv_y_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         inv_y_box.append(Gtk.Label(label="Invert Y"))
         self.gyro_inv_y = Gtk.Switch(valign=Gtk.Align.CENTER)
-        self.gyro_inv_y.connect("state-set", self.on_gyro_inv_changed)
+        self.gyro_inv_y.connect("state-set", self.on_gyro_sw_changed)
         inv_y_box.append(self.gyro_inv_y)
         inv_box.append(inv_y_box)
         
         gyro_box.append(inv_box)
+
+        # Activation
+        act_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        act_box.append(Gtk.Label(label="Activation", halign=Gtk.Align.START))
+        self.gyro_act_mode = Gtk.DropDown.new_from_strings(["Always On", "Hold Button", "Toggle Button"])
+        self.gyro_act_mode.set_selected(0)
+        self.gyro_act_mode.connect("notify::selected", self.on_gyro_ui_changed)
+        act_box.append(self.gyro_act_mode)
+        gyro_box.append(act_box)
+        
+        self.gyro_act_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.gyro_act_btn_box.append(Gtk.Label(label="Button", halign=Gtk.Align.START))
+        self.gyro_act_btns = ["LT (Left Trigger)", "RT (Right Trigger)", "LB (Left Bumper)", "RB (Right Bumper)", "Y1", "Y2", "Y3", "M2", "M3"]
+        self.gyro_act_btn_codes = [0x17, 0x19, 0x16, 0x18, 0x1c, 0x1d, 0x1e, 0x21, 0x22]
+        self.gyro_act_btn_drop = Gtk.DropDown.new_from_strings(self.gyro_act_btns)
+        self.gyro_act_btn_drop.set_selected(1)
+        self.gyro_act_btn_drop.connect("notify::selected", self.on_gyro_ui_changed)
+        self.gyro_act_btn_box.append(self.gyro_act_btn_drop)
+        gyro_box.append(self.gyro_act_btn_box)
+
         self.append(gyro_box)
 
-
+        GLib.idle_add(self.update_gyro_ui_visibility)
 
     def on_led_changed(self, *args):
         if not hasattr(self, 'sl_br'): return
@@ -364,26 +401,53 @@ class ControllerPanel(Gtk.Box):
         strength = dropdown.get_selected() + 1
         send_command(f"SET_VIBRATION {strength}")
 
-    def on_gyro_mode_changed(self, dropdown, pspec):
-        # Index 0-3 -> Command values 1-4
-        mode = dropdown.get_selected() + 1
-        send_command(f"SET_GYRO_MODE {mode}")
-        visible = mode > 1
-        self.gyro_sens_box.set_visible(visible)
-        self.gyro_inv_x.set_sensitive(visible)
-        self.gyro_inv_y.set_sensitive(visible)
+    def update_gyro_ui_visibility(self):
+        mode = self.gyro_mode.get_selected() + 1
+        vis = mode > 1
+        self.gyro_sens_box.set_visible(vis)
+        self.gyro_inv_x.set_sensitive(vis)
+        self.gyro_inv_y.set_sensitive(vis)
+        # Type only for joysticks (mode 2 or 3)
+        self.gyro_type_box.set_visible(mode in [2, 3])
+        # Action button only if not always (mode > 0)
+        act_mode = self.gyro_act_mode.get_selected()
+        self.gyro_act_btn_box.set_visible(act_mode > 0)
+        
+    def on_gyro_ui_changed(self, *args):
+        try:
+            self.update_gyro_ui_visibility()
+            self.send_gyro_config()
+        except Exception:
+            pass
 
-    def on_gyro_sens_changed(self, scale):
-        val = int(scale.get_value())
-        self.gyro_sens_lbl.set_label(f"Sensitivity: {val}")
-        send_command(f"SET_GYRO_SENS {val}")
-
-    def on_gyro_inv_changed(self, switch, state):
-        inv_x = 1 if self.gyro_inv_x.get_active() else 0
-        inv_y = 1 if self.gyro_inv_y.get_active() else 0
-        # This will be called for either switch, so we send both states
-        send_command(f"SET_GYRO_INV {inv_x} {inv_y}")
+    def on_gyro_sw_changed(self, switch, state):
+        self.send_gyro_config()
         return False
+
+    def send_gyro_config(self):
+        ctrl = 0x03 if self.gyro_ctrl.get_selected() == 0 else 0x04
+        mode = self.gyro_mode.get_selected() + 1
+        mtype = self.gyro_type.get_selected() + 1
+        sens = int(self.gyro_sens_scale.get_value())
+        self.gyro_sens_lbl.set_label(f"Sensitivity: {sens}")
+        inv_x = self.gyro_inv_x.get_active()
+        inv_y = self.gyro_inv_y.get_active()
+        
+        act_mode = self.gyro_act_mode.get_selected() + 1
+        btn_idx = self.gyro_act_btn_drop.get_selected()
+        btns = [self.gyro_act_btn_codes[btn_idx]] if act_mode > 1 else []
+        
+        cfg = {
+            "controller": ctrl,
+            "mode": mode,
+            "mapping_type": mtype,
+            "sensitivity": sens,
+            "invert_x": inv_x,
+            "invert_y": inv_y,
+            "activation_mode": act_mode,
+            "activation_buttons": btns
+        }
+        send_command("SET_GYRO_MAP " + json.dumps([cfg]))
 
 class RemappingPanel(Gtk.Box):
     def __init__(self, **kwargs):
@@ -661,7 +725,7 @@ class DisplayPanel(Gtk.Box):
         
         r_grid = Gtk.Grid(row_spacing=5, column_spacing=5)
         r_grid.attach(Gtk.Label(label="Res", halign=Gtk.Align.START), 0, 0, 1, 1)
-        self.res_drop = Gtk.DropDown.new_from_strings(["2560×1600", "1920×1200", "1440×900", "1280×800"])
+        self.res_drop = Gtk.DropDown.new_from_strings(["2560×1600", "1600×1200", "1440×900", "1280×800"])
         self.res_drop.connect("notify::selected", self.on_res_changed)
         r_grid.attach(self.res_drop, 1, 0, 1, 1)
         
@@ -734,10 +798,10 @@ class DisplayPanel(Gtk.Box):
 
     def on_res_changed(self, dropdown, pspec):
         res_map = [
-            (2560, 1600),  # 2560×1600
-            (1920, 1200),  # 1920×1200
-            (1440, 900),   # 1440×900
-            (1280, 800),   # 1280×800
+            (2560, 1600),  # 2560×1600 (native)
+            (1600, 1200),  # 1600×1200 (Mutter mode: 1200x1600)
+            (1440, 900),   # 1440×900  (Mutter mode: 900x1440)
+            (1280, 800),   # 1280×800  (Mutter mode: 800x1280)
         ]
         w, h = res_map[dropdown.get_selected()]
         send_command(f"SET_RESOLUTION {w} {h}")

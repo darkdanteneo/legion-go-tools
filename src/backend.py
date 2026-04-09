@@ -42,10 +42,25 @@ class DeviceBackend:
         
         self.sensor_debug = False
         self.last_sensor_log = 0
-        self.accel_x = "/sys/bus/iio/devices/iio:device0/in_accel_x_raw"
-        self.accel_y = "/sys/bus/iio/devices/iio:device0/in_accel_y_raw"
-        self.accel_z = "/sys/bus/iio/devices/iio:device0/in_accel_z_raw"
-        self.lux_path = "/sys/bus/iio/devices/iio:device2/in_illuminance_raw"
+        
+        # Dynamic IIO discovery
+        accel_dev = self._find_iio_device("accel_3d")
+        if accel_dev:
+            self.accel_x = os.path.join(accel_dev, "in_accel_x_raw")
+            self.accel_y = os.path.join(accel_dev, "in_accel_y_raw")
+            self.accel_z = os.path.join(accel_dev, "in_accel_z_raw")
+            print(f"Backend: Found Accelerometer at {accel_dev}")
+        else:
+            self.accel_x = "/sys/bus/iio/devices/iio:device0/in_accel_x_raw"
+            self.accel_y = "/sys/bus/iio/devices/iio:device0/in_accel_y_raw"
+            self.accel_z = "/sys/bus/iio/devices/iio:device0/in_accel_z_raw"
+
+        als_dev = self._find_iio_device("als")
+        if als_dev:
+            self.lux_path = os.path.join(als_dev, "in_illuminance_raw")
+            print(f"Backend: Found Ambient Light Sensor at {als_dev}")
+        else:
+            self.lux_path = "/sys/bus/iio/devices/iio:device2/in_illuminance_raw"
         
         # Auto-brightness state
         self.auto_brightness_enabled = False
@@ -62,7 +77,7 @@ class DeviceBackend:
         self.current_res_h = 1600
         self.current_rate = 144
         self.current_scale = 2.5
-        self.current_rot = 0
+        self.current_rot = 0  # 0 = landscape on this panel (Mutter handles native portrait)
         
         self.worker_thread = threading.Thread(target=self._command_worker, daemon=True)
         self.worker_thread.start()
@@ -100,6 +115,16 @@ class DeviceBackend:
                 if key:
                     self.pending_commands[key] = line
             self.command_event.set()
+
+    def _find_iio_device(self, name):
+        """Find the IIO device path by name."""
+        for d in glob.glob("/sys/bus/iio/devices/iio:device*"):
+            try:
+                with open(os.path.join(d, "name")) as f:
+                    if f.read().strip() == name:
+                        return d
+            except: pass
+        return None
 
     def _find_hid_devices(self):
         dev_paths = []
@@ -260,68 +285,138 @@ class DeviceBackend:
 
     # --- Auto-brightness ---
     def _lux_to_brightness(self, lux):
-        """Map lux reading to brightness percentage (3-100) with a fine curve."""
-        if lux <= 0:
+        """Map lux reading to brightness percentage (3-100) with a snappy curve."""
+        if lux <= 5:
             return 3
-        elif lux >= 800:
+        elif lux >= 600:
             return 100
         else:
-            # Smooth logarithmic curve with wider range
-            normalized = math.log(lux + 1) / math.log(801)
+            # More sensitive log curve for low light
+            normalized = (math.log(lux) - math.log(5)) / (math.log(600) - math.log(5))
             return max(3, min(100, int(3 + normalized * 97)))
 
     def _set_backlight_pct(self, pct):
         """Set backlight brightness as a percentage (0-100)."""
-        for path in glob.glob("/sys/class/backlight/*/brightness"):
+        backlights = glob.glob("/sys/class/backlight/*/brightness")
+        if not backlights:
+            print("Backend: No backlight devices found!")
+            return
+            
+        for path in backlights:
             try:
                 with open(path.replace("brightness", "max_brightness")) as f:
                     max_b = int(f.read().strip())
                 min_b = max(1, int(max_b * 0.01))
                 target = max(min_b, int(max_b * pct / 100))
+                
+                # Check current value to avoid redundant writes
+                try:
+                    with open(path, "r") as f_read:
+                        if int(f_read.read().strip()) == target:
+                            continue
+                except: pass
+                
                 with open(path, "w") as f:
                     f.write(str(target))
-            except: pass
+                if self.sensor_debug:
+                    print(f"Backend: Set {path} to {target} ({pct}%)")
+            except Exception as e:
+                print(f"Backend: Failed to set brightness for {path}: {e}")
+
+    def _parse_mutter_modes(self, raw_output):
+        """Parse mode IDs and their available scales from GetCurrentState output.
+        Returns dict: { mode_id_str: [scale1, scale2, ...] }"""
+        import re
+        modes = {}
+        # Pattern: ('mode_id', width, height, refresh, preferred_scale, [scale_list], {props})
+        # Find each mode entry by matching the mode_id pattern and the scale list after it
+        pattern = r"'(\d+x\d+@[\d.]+)',\s*\d+,\s*\d+,\s*[\d.]+,\s*[\d.]+,\s*\[([\d.,\s]+)\]"
+        for m in re.finditer(pattern, raw_output):
+            mode_id = m.group(1)
+            scale_str = m.group(2)
+            scales = [float(s.strip()) for s in scale_str.split(",") if s.strip()]
+            modes[mode_id] = scales
+        return modes
 
     def _apply_display_config(self, w, h, r, rot, scale=None):
+        """Apply display config. w,h are user-facing landscape dimensions.
+        Mutter uses native portrait mode IDs - we find the right one dynamically."""
         try:
             if scale is None:
                 scale = self.current_scale
             
-            # 1. Get State
-            p = subprocess.run(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig", "-o", "/org/gnome/Mutter/DisplayConfig", "-m", "org.gnome.Mutter.DisplayConfig.GetCurrentState"], capture_output=True, text=True)
-            if p.returncode != 0: return
-            serial = p.stdout.split("uint32 ")[1].split(",")[0].strip()
+            # 1. Get current state from Mutter
+            p = subprocess.run(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+                "-o", "/org/gnome/Mutter/DisplayConfig", "-m",
+                "org.gnome.Mutter.DisplayConfig.GetCurrentState"],
+                capture_output=True, text=True)
+            if p.returncode != 0:
+                print(f"DisplayConfig Error: GetCurrentState failed")
+                return
             
-            # Mutter mode IDs are in native portrait format.
-            MODE_MAP = {
-                (2560, 1600, 144): "2560x1600@143.999",
-                (2560, 1600, 60):  "2560x1600@60.000",
-                (1920, 1200, 144): "1200x1600@143.999",
-                (1920, 1200, 60):  "1200x1600@143.999",
-                (1440, 900, 144):  "900x1440@143.999",
-                (1440, 900, 60):   "900x1440@143.999",
-                (1280, 800, 144):  "800x1280@143.999",
-                (1280, 800, 60):   "800x1280@143.999",
-            }
+            raw = p.stdout
+            serial = raw.split("uint32 ")[1].split(",")[0].strip()
             
-            # Valid scales reported by Mutter for each resolution
-            VALID_SCALES = {
-                (2560, 1600): [1.0, 1.25, 1.333, 1.667, 2.0, 2.5, 2.667],
-                (1920, 1200): [1.0, 1.25, 1.333, 1.667, 2.0],
-                (1440, 900):  [1.0, 1.25, 1.333, 1.5, 1.667],
-                (1280, 800):  [1.0, 1.25, 1.333],
-            }
+            # 2. Parse all available modes and their valid scales
+            available_modes = self._parse_mutter_modes(raw)
             
-            # Clamp scale to nearest valid value for this resolution
-            valid = VALID_SCALES.get((w, h), [1.0])
-            scale = min(valid, key=lambda s: abs(s - scale))
+            # 3. Find the right mode ID
+            # Native 2560x1600 is landscape in Mutter, sub-modes are portrait (e.g. 900x1440).
+            # Try both orderings: as-given (w x h) and portrait-swapped (min x max).
+            dim_candidates = [
+                (w, h),                          # as-is (works for native 2560x1600)
+                (min(w, h), max(w, h)),           # portrait swap (works for sub-modes)
+            ]
             
-            mode_id = MODE_MAP.get((w, h, r))
-            if not mode_id:
-                mode_id = MODE_MAP.get((w, h, 144), "2560x1600@143.999")
+            target_mode = None
+            target_scales = [1.0]
+            print(available_modes)
+            for dw, dh in dim_candidates:
+                if target_mode:
+                    break
+                for rate_str in [f"{r:.3f}", "143.999", "60.000"]:
+                    candidate = f"{dh}x{dw}@{rate_str}"
+                    if candidate in available_modes:
+                        target_mode = candidate
+                        target_scales = available_modes[candidate]
+                        break
             
-            cmd = f"gdbus call --session --dest org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/DisplayConfig -m org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig {serial} 2 \"[(0, 0, {scale}, uint32 {rot}, true, [('eDP-1', '{mode_id}', @a{{sv}} {{}})])]\" \"@a{{sv}} {{}}\""
-            subprocess.run(cmd, shell=True, check=False)
+            # Fallback: search all modes by pixel count
+            if not target_mode:
+                target_pixels = w * h
+                for mode_id, scales in available_modes.items():
+                    dims = mode_id.split("@")[0].split("x")
+                    if int(dims[0]) * int(dims[1]) == target_pixels:
+                        target_mode = mode_id
+                        target_scales = scales
+                        break
+            
+            if not target_mode:
+                print(f"DisplayConfig Error: No mode found for {w}x{h}@{r}Hz")
+                return
+            
+            # 4. Clamp scale to nearest valid value for this mode
+            scale = min(target_scales, key=lambda s: abs(s - scale))
+            
+            # 5. Determine effective transform
+            # Native 2560x1600 is landscape at transform=0 (GPU driver rotates internally).
+            # Sub-modes (1200x1600, 900x1440, etc.) are portrait-format in Mutter.
+            # For these, transform=3 (90° CW) makes them landscape-correct.
+            mode_dims = target_mode.split("@")[0].split("x")
+            mode_w, mode_h = int(mode_dims[0]), int(mode_dims[1])
+            
+            effective_rot = rot
+            if mode_w < mode_h:
+                # For portrait-native sub-modes (e.g. 800x1280), transform 3 is landscape
+                # effective_rot = (3 + rot) % 4
+                effective_rot = 0
+            
+            # 6. Apply
+            cmd = f"gdbus call --session --dest org.gnome.Mutter.DisplayConfig -o /org/gnome/Mutter/DisplayConfig -m org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig {serial} 2 \"[(0, 0, {repr(scale)}, uint32 {effective_rot}, true, [('eDP-1', '{target_mode}', @a{{sv}} {{}})])]\" \"@a{{sv}} {{}}\""
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0 and result.stderr:
+                print(f"DisplayConfig Error: {result.stderr.strip()}")
             
             # Save current state
             self.current_res_w = w
@@ -330,7 +425,7 @@ class DeviceBackend:
             self.current_scale = scale
             self.current_rot = rot
             
-            print(f"Backend: Applied Display Config {w}x{h}@{r}Hz Scale:{scale} Rot:{rot}")
+            print(f"Backend: Applied {w}x{h}@{r}Hz Mode:{target_mode} Scale:{scale} Rot:{rot} T:{effective_rot}")
         except Exception as e:
             print(f"DisplayConfig Error: {e}")
 
@@ -429,16 +524,13 @@ class DeviceBackend:
         elif cmd == "SET_VIBRATION" and len(parts) >= 2:
             strength = int(parts[1]) # 1-4
             controller_hid.set_vibration(strength)
-        elif cmd == "SET_GYRO_MODE" and len(parts) >= 2:
-            mode = int(parts[1]) # 1-4
-            controller_hid.set_gyro_mode(mode)
-        elif cmd == "SET_GYRO_SENS" and len(parts) >= 2:
-            sens = int(parts[1]) # 1-100
-            controller_hid.set_gyro_sensitivity(sens)
-        elif cmd == "SET_GYRO_INV" and len(parts) >= 3:
-            inv_x = int(parts[1]) == 1
-            inv_y = int(parts[2]) == 1
-            controller_hid.set_gyro_inversion(inv_x, inv_y)
+        elif cmd == "SET_GYRO_MAP" and len(parts) >= 2:
+            payload_str = full_line.split(maxsplit=1)[1]
+            try:
+                configs = json.loads(payload_str)
+                controller_hid.apply_gyro_mapping(configs)
+            except Exception as e:
+                print(f"Backend: Failed to parse SET_GYRO_MAP payload: {e}")
         elif cmd == "SET_CTRL_PROFILE" and len(parts) >= 2:
             prof_num = int(parts[1])
             for btn in ["Y1","Y2","Y3","M2","M3"]:
@@ -480,8 +572,9 @@ class DeviceBackend:
             val = int(parts[1])
             rot_map = {0: 0, 90: 1, 180: 2, 270: 3}
             rot = rot_map.get(val, 0)
-            subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "true"], check=False)
+            # Apply first to make it current, then lock it
             self._apply_display_config(self.current_res_w, self.current_res_h, self.current_rate, rot)
+            subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "true"], check=False)
         elif cmd == "SET_AUTO_ROTATION" and len(parts) >= 2:
             enabled = int(parts[1]) == 1
             self.auto_rotation_enabled = enabled
@@ -491,9 +584,8 @@ class DeviceBackend:
                 subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "false"], check=False)
                 self._emit_tablet_mode(True)
             else:
-                # Disable: lock at current orientation, but DON'T leave tablet mode
-                # (leaving tablet mode causes Mutter to reset to native portrait)
-                # Just lock orientation so GNOME stops rotating
+                # Disable: lock at CURRENT orientation. 
+                # Avoid re-applying config here to prevent GNOME's "keep changes" dialog.
                 subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.peripherals.touchscreen", "orientation-lock", "true"], check=False)
         elif cmd == "SET_LEGION_SWAP" and len(parts) >= 2:
             val = int(parts[1])
@@ -575,7 +667,7 @@ class DeviceBackend:
                                 with open(self.accel_y) as f: ay = f.read().strip()
                             if os.path.exists(self.accel_z):
                                 with open(self.accel_z) as f: az = f.read().strip()
-                            print(f"DEBUG SENSORS: Lux={lx_val} | Accel X={ax} Y={ay} Z={az}")
+                            print(f"DEBUG SENSORS: Lux={lx_val} (path: {self.lux_path}) | Accel X={ax} Y={ay} Z={az}")
                         
                         # Auto-brightness: smooth transition using EMA
                         if self.auto_brightness_enabled and lx_val is not None:
@@ -584,22 +676,24 @@ class DeviceBackend:
                             if self.smoothed_brightness < 0:
                                 self.smoothed_brightness = float(raw_target)
                             else:
-                                # Exponential moving average: alpha=0.3 for smooth transitions
-                                self.smoothed_brightness = 0.3 * raw_target + 0.7 * self.smoothed_brightness
+                                # EMA alpha=0.6 for more responsiveness
+                                self.smoothed_brightness = 0.6 * raw_target + 0.4 * self.smoothed_brightness
                             
-                            # Apply in small steps (max 3% change per tick) for gradual fade
+                            # Apply in bolder steps (max 8% change per 0.5s)
                             final = int(self.smoothed_brightness)
                             if self.last_auto_br_value < 0:
                                 self.last_auto_br_value = final
-                            step = max(-3, min(3, final - self.last_auto_br_value))
+                            step = max(-100, min(100, final - self.last_auto_br_value))
                             if step != 0:
                                 self.last_auto_br_value += step
+                                if self.sensor_debug:
+                                    print(f"DEBUG: Auto-Brightness Target={final} Current={self.last_auto_br_value}%")
                                 self._set_backlight_pct(self.last_auto_br_value)
                         
                         self.last_sensor_log = curr
                     except: pass
             except Exception as e:
-                pass
+                print(f"Backend: Telemetry loop error: {e}")
             time.sleep(0.5 if self.auto_brightness_enabled else 2)
 
     def _hid_loop(self):

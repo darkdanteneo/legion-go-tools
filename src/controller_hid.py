@@ -184,32 +184,51 @@ def set_vibration(strength_idx):
     cmd = [0x05, 0x00, 0x06, 0x02, 0x00, strength_idx]
     send_command(cmd)
 
-def set_gyro_mode(mode_idx):
+def apply_gyro_mapping(configs):
     """
-    mode_idx: 1 (Disable), 2 (L-Stick), 3 (R-Stick), 4 (Mouse)
+    configs: list of dicts like:
+    {
+        "controller": 0x03 or 0x04,
+        "mode": 0x01 (Disable), 0x02 (L-Stick), 0x03 (R-Stick), 0x04 (Mouse),
+        "mapping_type": 0x01 (Instant), 0x02 (Continuous) - joystick only,
+        "sensitivity": 1-100,
+        "invert_x": bool,
+        "invert_y": bool,
+        "activation_mode": 0x01 (Always), 0x02 (Hold), 0x03 (Toggle),
+        "activation_buttons": [0x18, 0x19] # list of keys holding/toggling
+    }
     """
-    # 0x0e 02 04 XX where 04 is right con/global?
-    cmd = [0x05, 0x00, 0x0e, 0x02, 0x04, mode_idx]
-    send_command(cmd)
-
-def set_gyro_sensitivity(sensitivity):
-    """
-    sensitivity: 1-100
-    """
-    # 0x0e 04 04 00 00 SS SS where SS is hex 01-64
-    s_hex = int(min(max(sensitivity, 1), 100))
-    cmd = [0x05, 0x00, 0x0e, 0x04, 0x04, 0x00, 0x00, s_hex, s_hex]
-    send_command(cmd)
-
-def set_gyro_inversion(invert_x, invert_y):
-    """
-    invert_x/y: bool (True for On, False for Off)
-    """
-    # 0x0e 04 04 00 00 00 00 IX IY where IX/IY is 01 (Off) or 02 (On)
-    ix = 0x02 if invert_x else 0x01
-    iy = 0x02 if invert_y else 0x01
-    cmd = [0x05, 0x00, 0x0e, 0x04, 0x04, 0x00, 0x00, 0x00, 0x00, ix, iy]
-    send_command(cmd)
+    packets = []
+    for cfg in configs:
+        ctrl = cfg.get("controller", 0x04)
+        mode = cfg.get("mode", 0x01)
+        mtype = cfg.get("mapping_type", 0x01)
+        sens = int(min(max(cfg.get("sensitivity", 50), 1), 100))
+        inv_x = 0x02 if cfg.get("invert_x", False) else 0x01
+        inv_y = 0x02 if cfg.get("invert_y", False) else 0x01
+        act_mode = cfg.get("activation_mode", 0x01)
+        act_btns = cfg.get("activation_buttons", [])
+        
+        # 1. Turn on/off mapping for the controller
+        packets.append(pad_command([0x05, 0x00, 0x0e, 0x02, ctrl, mode]))
+        
+        if mode > 1: # If not disabled
+            if mode == 0x04: # Mouse mode
+                # 0x0e 04 04 00 00 SS SS 01 02
+                pkt = [0x05, 0x00, 0x0e, 0x04, ctrl, 0x00, 0x00, sens, sens, inv_x, inv_y]
+                packets.append(pad_command(pkt))
+            else: # Joystick mode (L-stick or R-stick)
+                # 0x0e 03 04 00 00 01 32 32 ff ff ff ff 01 01 
+                pkt = [0x05, 0x00, 0x0e, 0x03, ctrl, 0x00, 0x00, mtype, sens, sens, 0xff, 0xff, 0xff, 0xff, inv_x, inv_y]
+                packets.append(pad_command(pkt))
+                
+            # Activation buttons
+            # 0x0e 05 04 02 18
+            pkt_act = [0x05, 0x00, 0x0e, 0x05, ctrl, act_mode] + act_btns
+            packets.append(pad_command(pkt_act))
+            
+    if packets:
+        send_commands(packets)
 
 def remap_button_profile(profile_idx, button_name, action_name):
     """

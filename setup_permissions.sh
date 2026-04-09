@@ -67,6 +67,23 @@ for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
     [ -e "$f" ] && sudo chmod 666 "$f"
 done
 
+# 4a. Create PERSISTENT udev rules for the above
+SYSFS_RULE_FILE="/etc/udev/rules.d/98-legion-go-sysfs.rules"
+echo "Creating persistent udev rules for sysfs nodes..."
+cat <<EOF | sudo tee $SYSFS_RULE_FILE
+# Backlight
+SUBSYSTEM=="backlight", RUN+="/bin/chmod 666 /sys/class/backlight/%k/brightness"
+
+# Uinput (for tablet mode emulation)
+KERNEL=="uinput", MODE="0666"
+
+# GPU (amdgpu)
+KERNEL=="card*", SUBSYSTEM=="drm", RUN+="/bin/chmod 666 /sys/class/drm/%k/device/power_dpm_force_performance_level /sys/class/drm/%k/device/pp_od_clk_voltage"
+
+# CPU
+SUBSYSTEM=="cpu", RUN+="/bin/chmod 666 /sys/devices/system/cpu/amd_pstate/cpb_boost /sys/devices/system/cpu/cpufreq/boost /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu1/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu2/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu3/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu5/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu6/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu7/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu9/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu10/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu11/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu12/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu13/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu14/cpufreq/scaling_max_freq /sys/devices/system/cpu/cpu15/cpufreq/scaling_max_freq"
+EOF
+
 # 5. Set SDL2 Controller String system-wide (for non-udev apps)
 if ! grep -q "SDL_GAMECONTROLLERCONFIG" /etc/environment; then
     echo "Adding SDL_GAMECONTROLLERCONFIG to /etc/environment..."
@@ -76,12 +93,14 @@ fi
 # 6. Legion Go Accelerometer Orientation Fix (required for auto-rotation)
 echo "Setting up accelerometer hwdb rule..."
 sudo mkdir -p /etc/udev/hwdb.d
+#  ACCEL_MOUNT_MATRIX=0, -1, 0; 1, 0, 0; 0, 0, 1
+#  ACCEL_MOUNT_MATRIX=0, 1, 0; -1, 0, 0; 0, 0, 1
 cat <<EOF | sudo tee /etc/udev/hwdb.d/99-legion-go-accel.hwdb
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*svnLENOVO:pn83E1:*
- ACCEL_MOUNT_MATRIX=1,0,0;0,1,0;0,0,1
+ ACCEL_MOUNT_MATRIX=1, 0, 0; 0, 1, 0; 0, 0, 1
 EOF
 sudo systemd-hwdb update
-sudo udevadm trigger
+sudo udevadm trigger -v /sys/bus/iio/devices/iio:device0
 
 # 7. Libinput Quirks (prevent input suppression in tablet mode)
 echo "Setting up libinput quirks for tablet mode..."
@@ -99,13 +118,6 @@ ModelTabletModeNoSuspend=1
 [Legion Controller]
 MatchBus=usb
 MatchVendor=0x17EF
-MatchProduct=0x6184
-ModelTabletModeNoSuspend=1
-
-[Legion Controller Connected]
-MatchBus=usb
-MatchVendor=0x17EF
-MatchProduct=0x6182
 ModelTabletModeNoSuspend=1
 EOF
 
