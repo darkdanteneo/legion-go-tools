@@ -471,6 +471,7 @@ class RemappingPanel(Gtk.Box):
             "Q": 0x14, "R": 0x15, "S": 0x16, "T": 0x17, "U": 0x18, "V": 0x19, "W": 0x1a, "X": 0x1b,
             "Y": 0x1c, "Z": 0x1d, "1": 0x1e, "2": 0x1f, "3": 0x20, "4": 0x21, "5": 0x22, "6": 0x23,
             "7": 0x24, "8": 0x25, "9": 0x26, "0": 0x27,
+            "Up": 0x52, "Down": 0x51, "Left": 0x50, "Right": 0x4f,
             "L-Ctrl": 0xe0, "L-Shift": 0xe1, "L-Alt": 0xe2, "Win": 0xe3,
             "R-Ctrl": 0xe4, "R-Shift": 0xe5, "R-Alt": 0xe6
         }
@@ -485,6 +486,15 @@ class RemappingPanel(Gtk.Box):
         lbl = Gtk.Label(label="Hardware Remapping", halign=Gtk.Align.START)
         lbl.add_css_class("heading")
         self.append(lbl)
+
+        # Profile Dropdown
+        prof_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        prof_box.append(Gtk.Label(label="Profile", hexpand=True, halign=Gtk.Align.START))
+        self.prof_drop = Gtk.DropDown.new_from_strings(["Gamepad", "Desktop", "Custom"])
+        self.prof_drop.set_selected(0)
+        self.prof_drop.connect("notify::selected", self.on_remapping_profile_changed)
+        prof_box.append(self.prof_drop)
+        self.append(prof_box)
         
         # --- Selector UI ---
         entry_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -567,6 +577,60 @@ class RemappingPanel(Gtk.Box):
         # Initial fix
         self.on_mode_changed(None, None)
 
+    def on_remapping_profile_changed(self, dropdown, pspec):
+        if getattr(self, "_syncing_prof", False): return
+        idx = dropdown.get_selected()
+        if idx == 0: # Gamepad
+            self.on_reset_defaults(None)
+            # Reset gyro as well (to disabled)
+            send_command("SET_GYRO_MAP " + json.dumps([{"controller": 0x04, "mode": 1}]))
+        elif idx == 1: # Desktop
+            self.apply_desktop_profile()
+
+    def apply_desktop_profile(self):
+        self.staged_mappings = []
+        desktop_data = [
+            ("A", 2, [0x28]), ("B", 2, [0x2a]), ("X", 3, [0x01]), ("Y", 3, [0x02]),
+            ("R-Stick Click", 2, [0x2c]), ("LB", 2, [0x2c]), ("RB", 3, [0x01]), ("M2", 3, [0x02]),
+            ("R-Stick Up", 2, [0x52]), ("R-Stick Down", 2, [0x51]), ("R-Stick Left", 2, [0x50]), ("R-Stick Right", 2, [0x4f]),
+            ("D-Pad Up", 2, [0x52]), ("D-Pad Down", 2, [0x51]), ("D-Pad Left", 2, [0x50]), ("D-Pad Right", 2, [0x4f]),
+        ]
+        
+        for btn_name, device, keys in desktop_data:
+            src_code = self.HW_BUTTONS.get(btn_name)
+            if src_code:
+                # Format for staged_mappings
+                display_suffix = ""
+                if device == 2:
+                    k_names = [name for name, code in self.KEYBOARD_KEYS.items() if code == keys[0] and name != "None"]
+                    display_suffix = k_names[0] if k_names else "Key"
+                elif device == 3:
+                    m_names = [name for name, code in self.MOUSE_BTNS.items() if code == keys[0]]
+                    display_suffix = m_names[0] if m_names else "Mouse"
+                
+                self.staged_mappings.append({
+                    "btn": src_code,
+                    "device": device,
+                    "keys": (keys + [0]*5)[:5],
+                    "display": f"{btn_name} → {display_suffix}"
+                })
+        
+        self.refresh_listview()
+        self.on_apply(None)
+        
+        # Gyro Mapping (Right Controller, Mouse, RT hold)
+        gyro_cfg = {
+            "controller": 0x04,
+            "mode": 4, # Mouse
+            "mapping_type": 1,
+            "sensitivity": 50,
+            "invert_x": False,
+            "invert_y": False,
+            "activation_mode": 2, # Hold
+            "activation_buttons": [0x19] # RT
+        }
+        send_command("SET_GYRO_MAP " + json.dumps([gyro_cfg]))
+
     def on_mode_changed(self, dropdown, pspec):
         mode = self.mode_drop.get_selected()
         if mode == 0: # Controller
@@ -641,6 +705,11 @@ class RemappingPanel(Gtk.Box):
         # Check for duplicates on same src
         self.staged_mappings = [m for m in self.staged_mappings if m["btn"] != src_code]
         self.staged_mappings.append(mapping)
+        
+        self._syncing_prof = True
+        self.prof_drop.set_selected(2) # Custom
+        self._syncing_prof = False
+        
         self.refresh_listview()
 
     def refresh_listview(self):
@@ -658,10 +727,21 @@ class RemappingPanel(Gtk.Box):
 
     def on_delete_mapping(self, btn, mapping):
         self.staged_mappings.remove(mapping)
+        
+        self._syncing_prof = True
+        self.prof_drop.set_selected(2) # Custom
+        self._syncing_prof = False
+        
         self.refresh_listview()
 
     def on_reset_defaults(self, btn):
         self.staged_mappings = []
+        
+        if btn is not None: # Manually clicked reset
+            self._syncing_prof = True
+            self.prof_drop.set_selected(0) # Gamepad
+            self._syncing_prof = False
+            
         self.refresh_listview()
         
         # Generate an explicit 1:1 mapping for all buttons (Native behavior)

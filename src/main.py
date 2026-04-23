@@ -23,7 +23,18 @@ class SidebarApp(Adw.Application):
         if not self.win:
             self.win = SidebarWindow(application=self)
             listen_for_buttons(self.win.toggle_visibility, self.win.toggle_keyboard, self.win.sync_sliders, self.win.update_telemetry)
-        # self.win.present() # default hidden
+            
+            # Register toggle action
+            action = Gio.SimpleAction.new("toggle-sidebar", None)
+            action.connect("activate", lambda a, p: self.win.toggle_visibility())
+            self.add_action(action)
+
+        self.win.present()
+        self.win.set_visible(False) # Start hidden as before, but initialized
+
+    def toggle_sidebar(self):
+        if self.win:
+            self.win.toggle_visibility()
 
 def main():
     app = SidebarApp()

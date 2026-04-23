@@ -127,8 +127,20 @@ export default class LegionOSKExtension extends Extension {
             .create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
 
         this._setupDBus();
+        this._oldShowKeyboard = null;
 
-        // ── Top Bar Indicator ───────────────────────────────────────────────
+        // ── Disable Built-in Keyboard ───────────────────────────────────────
+        // This prevents GNOME from popping up its own keyboard when auto-rotate
+        // triggers tablet mode.
+        if (Main.keyboard) {
+            this._oldShowKeyboard = Main.keyboard.show;
+            Main.keyboard.show = () => {
+                console.log("[LegionOSK] Suppressing built-in GNOME OSK");
+            };
+        }
+
+        // ── Top Bar Indicators ──────────────────────────────────────────────
+        // 1. Keyboard Toggle
         this._indicator = new PanelMenu.Button(0.0, "Legion OSK Indicator", false);
         const icon = new St.Icon({
             gicon: new Gio.ThemedIcon({ name: 'input-keyboard-symbolic' }),
@@ -142,14 +154,39 @@ export default class LegionOSKExtension extends Extension {
         });
         Main.panel.addToStatusArea("LegionOSK", this._indicator);
 
+        // 2. Sidebar Toggle
+        this._sidebarIndicator = new PanelMenu.Button(0.0, "Legion Sidebar Indicator", false);
+        const sIcon = new St.Icon({
+            gicon: new Gio.ThemedIcon({ name: 'emblem-system-symbolic' }),
+            style_class: 'system-status-icon'
+        });
+        this._sidebarIndicator.add_child(sIcon);
+        const toggleSidebar = () => {
+            Gio.DBus.session.call(
+                'com.github.shubu.LegionSidebar',
+                '/com/github/shubu/LegionSidebar',
+                'org.gtk.Actions',
+                'Activate',
+                new GLib.Variant('(sava{sv})', ['toggle-sidebar', [], {}]),
+                null, Gio.DBusCallFlags.NONE, -1, null, null
+            );
+        };
+        this._sidebarIndicator.connect("button-press-event", () => { toggleSidebar(); return Clutter.EVENT_STOP; });
+        this._sidebarIndicator.connect("touch-event", (_actor, event) => {
+            if (event.type() === Clutter.EventType.TOUCH_END) toggleSidebar();
+            return Clutter.EVENT_STOP;
+        });
+        Main.panel.addToStatusArea("LegionSidebar", this._sidebarIndicator);
+
         // ── Lock Screen Touch Detection ─────────────────────────────────────
         this._stageEventId = global.stage.connect('event', (_actor, event) => {
-            if (Main.sessionMode.currentMode === 'unlock-dialog' && event.type() === Clutter.EventType.TOUCH_END) {
+            const mode = Main.sessionMode.currentMode;
+            if (mode === 'unlock-dialog' && (event.type() === Clutter.EventType.TOUCH_END || event.type() === Clutter.EventType.BUTTON_RELEASE)) {
                 let source = event.get_source();
                 let isEntry = false;
                 while (source) {
-                    if (source instanceof St.Entry || source instanceof Clutter.Text ||
-                        (source.constructor && source.constructor.name && source.constructor.name.includes('Entry'))) {
+                    const name = source.constructor ? source.constructor.name : '';
+                    if (source instanceof St.Entry || source instanceof Clutter.Text || name.includes('Entry') || name.includes('Password')) {
                         isEntry = true;
                         break;
                     }
@@ -203,6 +240,14 @@ export default class LegionOSKExtension extends Extension {
         if (this._indicator) {
             this._indicator.destroy();
             this._indicator = null;
+        }
+        if (this._sidebarIndicator) {
+            this._sidebarIndicator.destroy();
+            this._sidebarIndicator = null;
+        }
+        if (this._oldShowKeyboard && Main.keyboard) {
+            Main.keyboard.show = this._oldShowKeyboard;
+            this._oldShowKeyboard = null;
         }
         this._endDrag();
         this._teardownDBus();

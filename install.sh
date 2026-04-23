@@ -53,11 +53,26 @@ sed -i "s|Exec=python3 .*|Exec=python3 $PROJECT_DIR/src/main.py|" "$PROJECT_DIR/
 mkdir -p ~/.config/autostart
 ln -sf "$PROJECT_DIR/legion-go-app.desktop" ~/.config/autostart/legion-go-app.desktop
 
-# 4. Reload and Enable Service
+# 4. Install GNOME Shell Extension (System-wide for Lock Screen support)
+echo "Installing GNOME Shell extension..."
+EXT_UUID="legion-osk@shubu.com"
+EXT_PATH="/usr/share/gnome-shell/extensions/$EXT_UUID"
+sudo mkdir -p "$EXT_PATH"
+sudo cp -f "$PROJECT_DIR/src/keyboard.js" "$EXT_PATH/extension.js"
+sudo cp -f "$PROJECT_DIR/src/metadata.json" "$EXT_PATH/metadata.json"
+sudo chmod -R 755 "$EXT_PATH"
+
+# 5. Reload and Enable Service
 echo "Reloading systemd and enabling service..."
 sudo systemctl daemon-reload
 sudo systemctl enable legion-go-setup.service
 sudo systemctl restart legion-go-setup.service
+
+# 6. Enable Extension
+echo "Enabling extension..."
+# We try to enable it for the current user, but system-wide it's already there
+gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+# For GDM/Lock screen, being in /usr/share and having session-modes is usually enough if enabled.
 
 echo "--------------------------------------------------"
 echo "Installation Complete!"
