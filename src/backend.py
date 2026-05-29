@@ -5,6 +5,7 @@ import json
 import struct
 import ctypes
 import fcntl
+import pathlib
 import subprocess
 import threading
 import select
@@ -16,6 +17,44 @@ import controller_hid
 
 LEGION_PIDS = [0x6182, 0x6183, 0x6184, 0x6185, 0x61EB, 0x61EC, 0x61ED, 0x61EE]
 VID = 0x17EF
+
+SETTINGS_PATH = pathlib.Path.home() / ".config" / "legion-go-sidebar" / "settings.json"
+
+# First-run defaults (user-visible: Custom profile @ 43W / 79C)
+DEFAULT_SETTINGS = {
+    "SET_PROFILE": "SET_PROFILE custom",
+    "SET_TDP": "SET_TDP 43",
+    "SET_TEMP": "SET_TEMP 79",
+}
+
+# Commands whose state we save & restore. Everything else is transient.
+PERSISTENT_KEYS = {
+    "SET_PROFILE", "SET_TDP", "SET_TEMP",
+    "SET_CPU_BOOST", "SET_CPU_MAX_FREQ",
+    "SET_GPU_FREQ", "SET_GPU_FREQ_MODE",
+    "SET_FAN_CURVE", "SET_FULL_FAN",
+    "SET_BATTERY_LIMIT",
+}
+
+# Re-apply order on startup / AC change. Profile MUST come first so
+# the EC switches to Custom mode before ryzenadj writes TDP / temp.
+APPLY_ORDER = [
+    "SET_PROFILE",
+    "SET_TDP",
+    "SET_TEMP",
+    "SET_FAN_CURVE",
+    "SET_FULL_FAN",
+    "SET_CPU_BOOST",
+    "SET_CPU_MAX_FREQ",
+    "SET_GPU_FREQ_MODE",
+    "SET_GPU_FREQ",
+    "SET_BATTERY_LIMIT",
+]
+
+# When the user picks one of these, drop the other (mutually exclusive intent).
+CONFLICT_GROUPS = [
+    ("SET_GPU_FREQ", "SET_GPU_FREQ_MODE"),
+]
 
 class DeviceBackend:
     def __init__(self):
@@ -79,6 +118,12 @@ class DeviceBackend:
         self.current_scale = 2.5
         self.current_rot = 0  # 0 = landscape on this panel (Mutter handles native portrait)
         
+        # Persistent power/thermal settings (re-applied on startup & AC events)
+        self.settings_lock = threading.Lock()
+        self.persisted_settings = self._load_persisted_settings()
+        self._ensure_default_settings()
+        self.last_ac_online = self._get_ac_online()
+
         self.worker_thread = threading.Thread(target=self._command_worker, daemon=True)
         self.worker_thread.start()
         
@@ -87,6 +132,10 @@ class DeviceBackend:
         
         self.telemetry_thread = threading.Thread(target=self._telemetry_loop, daemon=True)
         self.telemetry_thread.start()
+
+        # Apply persisted settings on boot. Run in a thread so we don't block
+        # the GUI startup, and give the EC / acpi_call a moment to settle.
+        threading.Timer(1.0, self._apply_persisted_settings).start()
 
     def set_callbacks(self, toggle, keyboard, sync, telemetry):
         self.toggle_callback = toggle
@@ -187,6 +236,76 @@ class DeviceBackend:
         if self.sync_callback:
             GLib.idle_add(self.sync_callback, payload)
 
+    # --- Persistent power/thermal settings ---
+    def _load_persisted_settings(self):
+        try:
+            if SETTINGS_PATH.exists():
+                with open(SETTINGS_PATH) as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception as e:
+            print(f"Backend: Failed to load persisted settings: {e}")
+        return {}
+
+    def _save_persisted_settings(self):
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = SETTINGS_PATH.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(self.persisted_settings, f, indent=2)
+            os.replace(tmp, SETTINGS_PATH)
+        except Exception as e:
+            print(f"Backend: Failed to save persisted settings: {e}")
+
+    def _ensure_default_settings(self):
+        """First-run defaults so the device boots into Custom @ 43W / 79C."""
+        changed = False
+        with self.settings_lock:
+            for k, v in DEFAULT_SETTINGS.items():
+                if k not in self.persisted_settings:
+                    self.persisted_settings[k] = v
+                    changed = True
+            if changed:
+                self._save_persisted_settings()
+
+    def _persist_command(self, cmd, full_line):
+        if cmd not in PERSISTENT_KEYS:
+            return
+        with self.settings_lock:
+            for group in CONFLICT_GROUPS:
+                if cmd in group:
+                    for k in group:
+                        if k != cmd and k in self.persisted_settings:
+                            del self.persisted_settings[k]
+            self.persisted_settings[cmd] = full_line
+            self._save_persisted_settings()
+
+    def _apply_persisted_settings(self, reason="startup"):
+        """Re-issue every persisted command via the command queue, in order."""
+        with self.settings_lock:
+            snapshot = dict(self.persisted_settings)
+        applied = []
+        for cmd in APPLY_ORDER:
+            if cmd in snapshot:
+                self.send_command(snapshot[cmd])
+                applied.append(cmd)
+        if applied:
+            print(f"Backend: Re-applied persisted settings ({reason}): {', '.join(applied)}")
+
+    def _get_ac_online(self):
+        """Return True if AC adapter is plugged in, False if on battery, None if unknown."""
+        for p in glob.glob("/sys/class/power_supply/*"):
+            try:
+                with open(os.path.join(p, "type")) as f:
+                    if f.read().strip() != "Mains":
+                        continue
+                with open(os.path.join(p, "online")) as f:
+                    return f.read().strip() == "1"
+            except Exception:
+                pass
+        return None
+
     def _command_worker(self):
         while self.running:
             self.command_event.wait(timeout=1.0)
@@ -212,6 +331,7 @@ class DeviceBackend:
                     if not parts: continue
                     cmd = parts[0]
                     self._handle_single_command(cmd, parts, line)
+                    self._persist_command(cmd, line)
                 except Exception as e:
                     print(f"Error handling backend command: {e}")
             
@@ -647,7 +767,19 @@ class DeviceBackend:
                 
                 if self.telemetry_callback:
                     GLib.idle_add(self.telemetry_callback, payload)
-                
+
+                # AC adapter state change → EC resets profile/TDP/temp.
+                # Re-apply persisted settings whenever the plug state flips.
+                ac_now = self._get_ac_online()
+                if ac_now is not None and ac_now != self.last_ac_online:
+                    prev = self.last_ac_online
+                    self.last_ac_online = ac_now
+                    if prev is not None:
+                        reason = f"AC {'plugged' if ac_now else 'unplugged'}"
+                        print(f"Backend: {reason}, scheduling re-apply.")
+                        # Give the EC ~1.5s to settle before re-issuing.
+                        threading.Timer(1.5, self._apply_persisted_settings, args=(reason,)).start()
+
                 # Sensor Debug Logging & Auto-Brightness (1s interval)
                 curr = time.time()
                 if curr - self.last_sensor_log > 0.5:

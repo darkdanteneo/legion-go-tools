@@ -10,11 +10,28 @@ done
 
 # 1. Install System Dependencies
 echo "Installing system dependencies..."
-sudo dnf install -y python3-gobject python3-pip gtk4 libadwaita hidapi kernel-devel akmod-acpi_call acpi_call || true
+# Note: Fedora 40+ ships acpi_call as a DKMS package (acpi_call-dkms),
+# replacing the older akmod-acpi_call. Pull in `dkms` explicitly so it's
+# guaranteed present even if the dep tree changes upstream.
+sudo dnf install -y \
+    python3-gobject python3-pip gtk4 libadwaita hidapi \
+    kernel-devel dkms acpi_call-dkms || true
 
-# 2. Load acpi_call module permanently
-echo "Configuring acpi_call module..."
-sudo modprobe acpi_call 2>/dev/null
+# 2. Build and load acpi_call kernel module
+# DKMS state can drift after a Fedora major upgrade: the source tree under
+# /usr/src/acpi_call-* may be physically missing even though `rpm -q` still
+# reports the package as installed, leaving `dkms status` in the "broken"
+# state. Try autoinstall first (cheap no-op if already built); on failure,
+# reinstall the package to restore /usr/src and rebuild.
+echo "Configuring acpi_call kernel module..."
+sudo dkms autoinstall -k "$(uname -r)" 2>/dev/null || true
+if ! sudo modprobe acpi_call 2>/dev/null; then
+    echo "  acpi_call failed to load - attempting recovery..."
+    sudo dnf reinstall -y acpi_call-dkms 2>/dev/null || true
+    sudo dkms autoinstall -k "$(uname -r)" 2>/dev/null || true
+    sudo modprobe acpi_call 2>/dev/null \
+        || echo "  WARNING: acpi_call still unavailable. Run 'sudo dkms status' to diagnose."
+fi
 echo "acpi_call" | sudo tee /etc/modules-load.d/acpi_call.conf > /dev/null
 
 # 3. Copy System Files (REQUIRED for Fedora/SELinux)

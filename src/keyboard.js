@@ -141,7 +141,12 @@ export default class LegionOSKExtension extends Extension {
 
         // ── Top Bar Indicators ──────────────────────────────────────────────
         // 1. Keyboard Toggle
-        this._indicator = new PanelMenu.Button(0.0, "Legion OSK Indicator", false);
+        // NOTE: dontCreateMenu MUST be `true` on GNOME 50+. PanelMenu.Button
+        // now uses Clutter.ClickGesture (a ClutterAction) to toggle its menu,
+        // and that gesture eats press/touch events before any signal handler
+        // runs. Passing `true` disables the gesture so our `button-press-event`
+        // / `touch-event` connects fire normally.
+        this._indicator = new PanelMenu.Button(0.0, "Legion OSK Indicator", true);
         const icon = new St.Icon({
             gicon: new Gio.ThemedIcon({ name: 'input-keyboard-symbolic' }),
             style_class: 'system-status-icon'
@@ -154,8 +159,8 @@ export default class LegionOSKExtension extends Extension {
         });
         Main.panel.addToStatusArea("LegionOSK", this._indicator);
 
-        // 2. Sidebar Toggle
-        this._sidebarIndicator = new PanelMenu.Button(0.0, "Legion Sidebar Indicator", false);
+        // 2. Sidebar Toggle (same dontCreateMenu=true rationale as above)
+        this._sidebarIndicator = new PanelMenu.Button(0.0, "Legion Sidebar Indicator", true);
         const sIcon = new St.Icon({
             gicon: new Gio.ThemedIcon({ name: 'emblem-system-symbolic' }),
             style_class: 'system-status-icon'
@@ -355,8 +360,9 @@ export default class LegionOSKExtension extends Extension {
         // Position off-screen initially
         this._chrome.set_position(-this._kbW, -this._kbH);
 
+        // GNOME 50 removed `affectsInputRegion`: input region is now derived
+        // automatically from the actor's reactivity.
         Main.layoutManager.addChrome(this._chrome, {
-            affectsInputRegion: true,
             affectsStruts: false,
             trackFullscreen: true,
         });
