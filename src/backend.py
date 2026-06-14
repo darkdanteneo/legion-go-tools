@@ -34,6 +34,7 @@ PERSISTENT_KEYS = {
     "SET_GPU_FREQ", "SET_GPU_FREQ_MODE",
     "SET_FAN_CURVE", "SET_FULL_FAN",
     "SET_BATTERY_LIMIT",
+    "SET_NVIDIA_OC",
 }
 
 # Re-apply order on startup / AC change. Profile MUST come first so
@@ -49,12 +50,25 @@ APPLY_ORDER = [
     "SET_GPU_FREQ_MODE",
     "SET_GPU_FREQ",
     "SET_BATTERY_LIMIT",
+    "SET_NVIDIA_OC",
 ]
 
 # When the user picks one of these, drop the other (mutually exclusive intent).
 CONFLICT_GROUPS = [
     ("SET_GPU_FREQ", "SET_GPU_FREQ_MODE"),
 ]
+
+def is_nvidia_gpu_connected():
+    import glob
+    for vendor_path in glob.glob("/sys/class/drm/card*/device/vendor"):
+        try:
+            with open(vendor_path, "r") as f:
+                if "0x10de" in f.read():
+                    return True
+        except:
+            pass
+    return False
+
 
 class DeviceBackend:
     def __init__(self):
@@ -135,7 +149,7 @@ class DeviceBackend:
 
         # Apply persisted settings on boot. Run in a thread so we don't block
         # the GUI startup, and give the EC / acpi_call a moment to settle.
-        threading.Timer(1.0, self._apply_persisted_settings).start()
+        threading.Timer(5.0, self._apply_persisted_settings).start()
 
     def set_callbacks(self, toggle, keyboard, sync, telemetry):
         self.toggle_callback = toggle
@@ -208,6 +222,22 @@ class DeviceBackend:
                         parts = line.split('|')
                         if len(parts) >= 3: state["temp"] = int(float(parts[2].strip()))
             except: pass
+
+        # Check Nvidia GPU and OC state
+        nvidia_oc_path = "/usr/local/bin/nvidia-oc"
+        if is_nvidia_gpu_connected() and os.path.exists(nvidia_oc_path):
+            try:
+                out = subprocess.check_output([nvidia_oc_path, "get", "--index", "0"], text=True, stderr=subprocess.DEVNULL)
+                for line in out.splitlines():
+                    line_l = line.lower()
+                    if "core clock offset" in line_l:
+                        state["nvidia_core"] = int(line_l.split(":")[-1].replace("mhz", "").strip())
+                    elif "memory clock offset" in line_l:
+                        state["nvidia_mem"] = int(line_l.split(":")[-1].replace("mhz", "").strip())
+                    elif "power limit" in line_l and "range" not in line_l:
+                        state["nvidia_power"] = int(line_l.split(":")[-1].replace("w", "").strip())
+            except:
+                pass
 
         try:
             with open("/sys/devices/system/cpu/cpufreq/boost") as f:
@@ -292,6 +322,9 @@ class DeviceBackend:
                 applied.append(cmd)
         if applied:
             print(f"Backend: Re-applied persisted settings ({reason}): {', '.join(applied)}")
+            # Worker is debounced (0.1s) and each ryzenadj call is ~200-500ms.
+            # Refresh the UI once the batch should be done so sliders catch up.
+            threading.Timer(3.0, self._initial_sync).start()
 
     def _get_ac_online(self):
         """Return True if AC adapter is plugged in, False if on battery, None if unknown."""
@@ -713,6 +746,21 @@ class DeviceBackend:
             for fd in list(self.fds.keys()):
                 try: os.write(fd, payload)
                 except: pass
+        elif cmd == "SET_NVIDIA_OC" and len(parts) >= 4:
+            power = int(parts[1])
+            core = int(parts[2])
+            mem = int(parts[3])
+            nvidia_oc_path = "/usr/local/bin/nvidia-oc"
+            if os.path.exists(nvidia_oc_path):
+                try:
+                    subprocess.call([
+                        nvidia_oc_path, "set", "--index", "0",
+                        "--power-limit", str(power * 1000),
+                        "--freq-offset", str(core),
+                        "--mem-offset", str(mem)
+                    ], stderr=subprocess.DEVNULL)
+                except Exception as e:
+                    print(f"Backend: Failed to run nvidia-oc set: {e}")
 
     def _telemetry_loop(self):
         while self.running:

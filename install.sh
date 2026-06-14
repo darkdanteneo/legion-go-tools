@@ -57,6 +57,15 @@ sudo rm -f /usr/local/bin/ryzenadj
 sudo cp -f "$PROJECT_DIR/bin/ryzenadj" /usr/local/bin/ryzenadj
 sudo chmod +x /usr/local/bin/ryzenadj
 
+# COPY and compile nvidia-oc
+echo "Compiling and copying nvidia-oc..."
+gcc -O2 "$PROJECT_DIR/bin/nvidia-oc-wrapper.c" -o "$PROJECT_DIR/bin/nvidia-oc-wrapper"
+sudo rm -f /usr/local/bin/nvidia-oc-bin /usr/local/bin/nvidia-oc
+sudo cp -f "$PROJECT_DIR/bin/nvidia-oc" /usr/local/bin/nvidia-oc-bin
+sudo cp -f "$PROJECT_DIR/bin/nvidia-oc-wrapper" /usr/local/bin/nvidia-oc
+sudo chmod +x /usr/local/bin/nvidia-oc-bin
+sudo chmod +x /usr/local/bin/nvidia-oc
+
 # CRITICAL: Use a REAL FILE for the service unit.
 echo "Configuring systemd service..."
 sudo rm -f /etc/systemd/system/legion-go-setup.service

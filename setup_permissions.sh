@@ -45,6 +45,15 @@ if [ -f "$RYZENADJ_PATH" ]; then
     sudo chmod +s "$RYZENADJ_PATH"
 fi
 
+# 3b. Nvidia-OC permissions
+NVIDIAOC_PATH="/usr/local/bin/nvidia-oc"
+if [ -f "$NVIDIAOC_PATH" ]; then
+    echo "Setting SUID bit on $NVIDIAOC_PATH..."
+    sudo chown root:root "$NVIDIAOC_PATH" /usr/local/bin/nvidia-oc-bin
+    sudo chmod +s "$NVIDIAOC_PATH"
+    sudo chmod +x /usr/local/bin/nvidia-oc-bin
+fi
+
 # 4. CPU/GPU/Display Frequency & Brightness Control Permissions
 echo "Setting permissions for hardware control..."
 # GPU

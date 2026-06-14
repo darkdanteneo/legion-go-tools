@@ -905,6 +905,103 @@ class DisplayPanel(Gtk.Box):
         send_command(f"SET_ROTATION {val}")
         self.auto_rot_sw.set_active(False)
 
+def is_nvidia_gpu_connected():
+    import glob
+    for vendor_path in glob.glob("/sys/class/drm/card*/device/vendor"):
+        try:
+            with open(vendor_path, "r") as f:
+                if "0x10de" in f.read():
+                    return True
+        except:
+            pass
+    return False
+
+class NvidiaPanel(Gtk.Box):
+    def __init__(self, **kwargs):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8, margin_start=10, margin_end=10, **kwargs)
+        
+        # Title
+        title_lbl = Gtk.Label(label="Nvidia GPU Overclocking", halign=Gtk.Align.START)
+        title_lbl.add_css_class("heading")
+        self.append(title_lbl)
+        
+        # --- 1. Power Target (W) ---
+        power_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.power_label = Gtk.Label(label="Power Target: 300 W", halign=Gtk.Align.START)
+        self.power_label.add_css_class("caption")
+        power_box.append(self.power_label)
+        
+        self.power_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 100, 300, 5)
+        self.power_scale.set_draw_value(False)
+        self.power_scale.set_value(300)
+        self.power_scale.connect("value-changed", self.on_power_changed)
+        power_box.append(self.power_scale)
+        self.append(power_box)
+        
+        # --- 2. Core Clock Offset (MHz) ---
+        core_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.core_label = Gtk.Label(label="Core Clock Offset: +160 MHz", halign=Gtk.Align.START)
+        self.core_label.add_css_class("caption")
+        core_box.append(self.core_label)
+        
+        self.core_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 300, 5)
+        self.core_scale.set_draw_value(False)
+        self.core_scale.set_value(160)
+        self.core_scale.connect("value-changed", self.on_core_changed)
+        core_box.append(self.core_scale)
+        self.append(core_box)
+        
+        # --- 3. Memory Clock Offset (MHz) ---
+        mem_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.mem_label = Gtk.Label(label="Memory Clock Offset: +2000 MHz", halign=Gtk.Align.START)
+        self.mem_label.add_css_class("caption")
+        mem_box.append(self.mem_label)
+        
+        self.mem_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 2000, 50)
+        self.mem_scale.set_draw_value(False)
+        self.mem_scale.set_value(2000)
+        self.mem_scale.connect("value-changed", self.on_mem_changed)
+        mem_box.append(self.mem_scale)
+        self.append(mem_box)
+        
+        # --- 4. Buttons ---
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        
+        self.default_oc_btn = Gtk.Button(label="Default OC", hexpand=True)
+        self.default_oc_btn.connect("clicked", self.on_default_oc_clicked)
+        btn_box.append(self.default_oc_btn)
+        
+        self.apply_btn = Gtk.Button(label="Apply Settings", hexpand=True)
+        self.apply_btn.add_css_class("suggested-action")
+        self.apply_btn.connect("clicked", self.on_apply_clicked)
+        btn_box.append(self.apply_btn)
+        
+        self.append(btn_box)
+
+    def on_power_changed(self, scale):
+        val = int(scale.get_value())
+        self.power_label.set_label(f"Power Target: {val} W")
+
+    def on_core_changed(self, scale):
+        val = int(scale.get_value())
+        self.core_label.set_label(f"Core Clock Offset: +{val} MHz")
+
+    def on_mem_changed(self, scale):
+        val = int(scale.get_value())
+        self.mem_label.set_label(f"Memory Clock Offset: +{val} MHz")
+
+    def on_default_oc_clicked(self, btn):
+        self.power_scale.set_value(300)
+        self.core_scale.set_value(160)
+        self.mem_scale.set_value(2000)
+        send_command("SET_NVIDIA_OC 300 160 2000")
+
+    def on_apply_clicked(self, btn):
+        power = int(self.power_scale.get_value())
+        core = int(self.core_scale.get_value())
+        mem = int(self.mem_scale.get_value())
+        send_command(f"SET_NVIDIA_OC {power} {core} {mem}")
+
 class SidebarWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1120,6 +1217,13 @@ class SidebarWindow(Adw.ApplicationWindow):
         
         self.stack.add_titled(scrolled, "system", "⚙️")
         
+        if is_nvidia_gpu_connected():
+            self.nvidia_panel = NvidiaPanel()
+            nv_scrolled = Gtk.ScrolledWindow()
+            nv_scrolled.set_child(self.nvidia_panel)
+            nv_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            self.stack.add_titled(nv_scrolled, "nvidia", "🟢")
+        
         self.ctrl_panel = ControllerPanel()
         ctrl_scrolled = Gtk.ScrolledWindow()
         ctrl_scrolled.set_child(self.ctrl_panel)
@@ -1257,44 +1361,46 @@ class SidebarWindow(Adw.ApplicationWindow):
         else:
             self.fan_hover_lbl.set_label(f"Current Point: {temp}°C at {pct}% speed")
 
-    # TODO: Init nnot working, use system state instead of cached values
     def sync_sliders(self, data_str):
         try:
             parts = data_str.strip().split(maxsplit=1)
-            if parts[0] == "SYNC_INITIAL_JSON" and len(parts) >= 2:
-                self._syncing = True
-                state = json.loads(parts[1])
-                tdp = state.get("tdp")
-                
-                if tdp and not getattr(self, '_tdp_synced', False):
-                    if tdp == 8:
-                        self.profile_drop.set_selected(0) # quiet
-                    elif tdp == 15:
-                        self.profile_drop.set_selected(1) # balanced
-                    elif tdp == 20 or tdp == 30: # Example default perf
-                        self.profile_drop.set_selected(2) # performance
-                    else:
-                        self.profile_drop.set_selected(3) # custom
-                        self.tdp_scale.set_value(tdp)
-                    self._tdp_synced = True
-                
-                temp_lim = state.get("temp")
-                if temp_lim and not getattr(self, '_temp_synced', False):
-                    self.temp_scale.set_value(temp_lim)
-                    self._temp_synced = True
+            if parts[0] != "SYNC_INITIAL_JSON" or len(parts) < 2:
+                return
+            self._syncing = True
+            state = json.loads(parts[1])
 
-                if "cpu_max_freq" in state and not getattr(self, '_cpu_f_synced', False):
-                    self.cpu_scale.set_value(state["cpu_max_freq"])
-                    self._cpu_f_synced = True
-                if "cpu_boost" in state and not getattr(self, '_cpu_b_synced', False):
-                    self.cpu_switch.set_active(state["cpu_boost"])
-                    self._cpu_b_synced = True
-                if "gpu_max_freq" in state and not getattr(self, '_gpu_f_synced', False):
-                    self.gpu_scale.set_value(state["gpu_max_freq"])
-                    self.gpu_switch.set_active(True)
-                    self._gpu_f_synced = True
-                
-                self._syncing = False
+            tdp = state.get("tdp")
+            if tdp:
+                if tdp == 8:
+                    self.profile_drop.set_selected(0)   # quiet
+                elif tdp == 15:
+                    self.profile_drop.set_selected(1)   # balanced
+                elif tdp == 20 or tdp == 30:
+                    self.profile_drop.set_selected(2)   # performance
+                else:
+                    self.profile_drop.set_selected(3)   # custom
+                self.tdp_scale.set_value(tdp)
+
+            temp_lim = state.get("temp")
+            if temp_lim:
+                self.temp_scale.set_value(temp_lim)
+
+            if "cpu_max_freq" in state:
+                self.cpu_scale.set_value(state["cpu_max_freq"])
+            if "cpu_boost" in state:
+                self.cpu_switch.set_active(state["cpu_boost"])
+            if "gpu_max_freq" in state:
+                self.gpu_scale.set_value(state["gpu_max_freq"])
+                self.gpu_switch.set_active(True)
+
+            if "nvidia_power" in state and hasattr(self, "nvidia_panel"):
+                self.nvidia_panel.power_scale.set_value(state["nvidia_power"])
+            if "nvidia_core" in state and hasattr(self, "nvidia_panel"):
+                self.nvidia_panel.core_scale.set_value(state["nvidia_core"])
+            if "nvidia_mem" in state and hasattr(self, "nvidia_panel"):
+                self.nvidia_panel.mem_scale.set_value(state["nvidia_mem"])
+
+            self._syncing = False
         except Exception as e:
             print(f"Failed to sync sliders: {e}")
             self._syncing = False
